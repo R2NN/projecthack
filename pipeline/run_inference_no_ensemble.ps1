@@ -33,6 +33,25 @@ function Resolve-RequiredPath {
   return $resolved.Path
 }
 
+function Resolve-ExecutablePath {
+  param(
+    [string]$PathValue,
+    [string]$Label
+  )
+  if ([string]::IsNullOrWhiteSpace($PathValue)) {
+    throw "$Label is empty"
+  }
+  $resolved = Resolve-Path -LiteralPath $PathValue -ErrorAction SilentlyContinue
+  if ($null -ne $resolved) {
+    return $resolved.Path
+  }
+  $command = Get-Command $PathValue -ErrorAction SilentlyContinue
+  if ($null -ne $command -and ![string]::IsNullOrWhiteSpace($command.Source)) {
+    return $command.Source
+  }
+  throw "$Label is missing: $PathValue"
+}
+
 function Save-Timings {
   $script:Timings | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $script:TimingsJson -Encoding UTF8
   $script:Timings | Export-Csv -LiteralPath $script:TimingsCsv -NoTypeInformation -Encoding UTF8
@@ -101,12 +120,8 @@ function Copy-MinimalZones {
 }
 
 $VideoPath = Resolve-RequiredPath $VideoPath "VideoPath"
-if (!(Test-Path -LiteralPath $Python)) {
-  throw "Python is missing: $Python"
-}
-if (!(Test-Path -LiteralPath $TesseractExe)) {
-  throw "Tesseract is missing: $TesseractExe"
-}
+$Python = Resolve-ExecutablePath $Python "Python"
+$TesseractExe = Resolve-ExecutablePath $TesseractExe "Tesseract"
 if ([string]::IsNullOrWhiteSpace($DetectorCheckpoint)) {
   $AllDataCheckpoint = Join-Path $Root "models\rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth"
   $HoldoutCheckpoint = Join-Path $Root "models\rfdetr_small_price_tag_except_26_12_20_tiled1280_e8_checkpoint_best_total.pth"

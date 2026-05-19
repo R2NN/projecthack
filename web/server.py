@@ -33,6 +33,26 @@ PIPELINE_ROOT = Path(os.environ.get("LENTA_PIPELINE_ROOT", str(A_PIPELINE_ROOT i
 PIPELINE_SCRIPT = Path(os.environ.get("LENTA_PIPELINE_SCRIPT", str(PIPELINE_ROOT / "run_inference_no_ensemble.ps1")))
 PIPELINE_POWERSHELL = os.environ.get("LENTA_POWERSHELL", "powershell.exe" if sys.platform == "win32" else "pwsh")
 PIPELINE_PYTHON = os.environ.get("LENTA_PIPELINE_PYTHON", sys.executable)
+DEFAULT_TESSERACT_EXE = Path("A:/tesseract_env/Library/bin/tesseract.exe")
+DEFAULT_TESSDATA_DIR = Path("A:/tesseract_env/Library/share/tessdata")
+TESSERACT_EXE = os.environ.get(
+    "LENTA_TESSERACT_EXE",
+    str(
+        DEFAULT_TESSERACT_EXE
+        if sys.platform == "win32" and DEFAULT_TESSERACT_EXE.exists()
+        else shutil.which("tesseract") or "/usr/bin/tesseract"
+    ),
+)
+TESSDATA_DIR = Path(
+    os.environ.get(
+        "LENTA_TESSDATA_DIR",
+        str(
+            DEFAULT_TESSDATA_DIR
+            if sys.platform == "win32" and DEFAULT_TESSDATA_DIR.exists()
+            else "/usr/share/tesseract-ocr/5/tessdata"
+        ),
+    )
+)
 DEFAULT_CHECKPOINT = Path(
     os.environ.get(
         "LENTA_DETECTOR_CHECKPOINT",
@@ -1114,6 +1134,16 @@ def build_job_status(job_id: str) -> dict[str, object] | None:
     }
 
 
+def resolve_executable(value: str) -> str:
+    candidate = Path(value)
+    if candidate.exists():
+        return str(candidate)
+    resolved = shutil.which(value)
+    if resolved:
+        return resolved
+    return value
+
+
 def run_pipeline(video_path: Path, video_id: str, run_root: Path, log_path: Path) -> Path:
     checkpoint = choose_checkpoint()
     if not PIPELINE_SCRIPT.exists():
@@ -1122,6 +1152,10 @@ def run_pipeline(video_path: Path, video_id: str, run_root: Path, log_path: Path
         raise FileNotFoundError(f"Detector checkpoint is missing: {checkpoint}")
     if not DEFAULT_CATALOG.exists():
         raise FileNotFoundError(f"Catalog is missing: {DEFAULT_CATALOG}")
+    pipeline_python = resolve_executable(PIPELINE_PYTHON)
+    tesseract_exe = resolve_executable(TESSERACT_EXE)
+    if not TESSDATA_DIR.exists():
+        raise FileNotFoundError(f"Tessdata directory is missing: {TESSDATA_DIR}")
 
     command = [
         PIPELINE_POWERSHELL,
@@ -1131,7 +1165,11 @@ def run_pipeline(video_path: Path, video_id: str, run_root: Path, log_path: Path
         "-File",
         str(PIPELINE_SCRIPT),
         "-Python",
-        PIPELINE_PYTHON,
+        pipeline_python,
+        "-TesseractExe",
+        tesseract_exe,
+        "-TessdataDir",
+        str(TESSDATA_DIR),
         "-VideoPath",
         str(video_path),
         "-VideoId",
