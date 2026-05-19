@@ -4,8 +4,25 @@ services:
       context: .
       args:
         INSTALL_PIPELINE_DEPS: ${INSTALL_PIPELINE_DEPS:-false}
+    environment:
+      LENTA_JOB_EXECUTION_MODE: ${LENTA_JOB_EXECUTION_MODE:-local}
     ports:
       - "5173:5173"
+    env_file:
+      - .env.example
+    volumes:
+      - ./runtime:/runtime
+      - ./artifacts:/artifacts:ro
+    restart: unless-stopped
+
+  shelf-worker:
+    profiles:
+      - workers
+    build:
+      context: .
+      args:
+        INSTALL_PIPELINE_DEPS: ${INSTALL_PIPELINE_DEPS:-false}
+    command: ["python", "/app/web/worker.py", "--poll-seconds", "2"]
     env_file:
       - .env.example
     volumes:

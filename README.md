@@ -18,6 +18,7 @@ https://via-thus-visibility-shore.trycloudflare.com/api/health
 - Загрузка больших MP4 идёт по частям: браузер отправляет файл блоками, а сервер запускает обработку после полной сборки файла.
 - Архитектура готова к горизонтальному масштабированию: видео, кадры и crops можно распределять между workers.
 - Для воспроизведения приложен `artifacts_for_judges.zip`: в нём уже лежат каталог и checkpoint в нужной структуре.
+- Добавлен worker-ready режим: web/API может только ставить задачи в очередь, а независимые workers забирают их без изменения ML-логики.
 
 ## Что важно для проверки
 
@@ -25,7 +26,7 @@ https://via-thus-visibility-shore.trycloudflare.com/api/health
 - **Соответствие формату**: результат экспортируется в CSV со схемой `sample.csv`, включая товарные поля, цены, скидки, barcode, QR-поля, координаты и служебные признаки.
 - **Воспроизводимость**: в репозитории есть Dockerfile, `docker-compose.yml`, проверка артефактов, README-инструкция и архив `artifacts_for_judges.zip` для полного запуска.
 - **Архитектура**: web/API, detector, OCR, catalog recovery, postprocess, хранилище результатов и review-отчёты разделены на понятные этапы.
-- **Масштабирование**: обработка естественно раскладывается по видео, кадрам и crops; GPU-детекцию, CPU/OCR workers и reducer можно запускать отдельно.
+- **Масштабирование**: обработка естественно раскладывается по видео, кадрам и crops; добавлен выключенный по умолчанию worker-ready слой с очередью, heartbeat, retry и lease-lock, поэтому workers можно подключать без переписывания pipeline.
 - **Демонстрация**: есть живой web-стенд, загрузка MP4 через браузер, прогресс обработки, скачивание CSV и отдельный HTML/ZIP-отчёт для проверки сложных случаев.
 
 Ссылка для последнего слайда презентации:
@@ -41,9 +42,13 @@ https://github.com/R2NN/projecthack
 flowchart TD
     A[MP4 видео робота] --> B[Web API]
     B --> C[Chunk upload storage]
-    C --> D[Job queue]
-    D --> E[RF-DETR detector]
-    E --> F[Tracking ценников]
+    C --> D{Execution mode}
+    D -->|local demo| E[Local inference thread]
+    D -->|worker-ready| W[SQLite queue / future MQ]
+    W --> X[GPU/CPU workers]
+    E --> Y[RF-DETR detector]
+    X --> Y
+    Y --> F[Tracking ценников]
     F --> G[Crop quality selection]
     G --> H[OCR zones]
     H --> I[Numeric OCR]
@@ -223,6 +228,34 @@ GET /api/metrics
 - контроля промо: скидочные ценники, расхождения цены карты и QR;
 - контроля выкладки относительно планограммы или expected assortment.
 
+## Worker-ready режим
+
+Это одна из ключевых частей решения для большого бизнеса. Текущий демо-стенд по умолчанию работает в `local` режиме, чтобы не рисковать стабильностью показа. При этом в код добавлен выключенный по умолчанию слой распределённой обработки:
+
+- `worker_tasks` в SQLite как локальный backend очереди;
+- atomic claim задачи через lease-lock, чтобы два worker не взяли один job;
+- retry counter и `max_attempts` для повторов после временных ошибок;
+- worker heartbeat для мониторинга живых обработчиков;
+- отдельный процесс `web/worker.py`, который забирает задачу и запускает тот же самый inference pipeline;
+- endpoint `GET /api/queue` для просмотра состояния очереди.
+
+Важно: worker-ready режим не меняет ML-логику и не влияет на точность. Детекция, OCR, catalog recovery, price sanity и dedup остаются теми же. Меняется только способ доставки задачи до обработчика.
+
+Локальный запуск с workers:
+
+```bash
+LENTA_JOB_EXECUTION_MODE=queue docker compose --profile workers up --build --scale shelf-worker=2
+```
+
+В PowerShell:
+
+```powershell
+$env:LENTA_JOB_EXECUTION_MODE="queue"
+docker compose --profile workers up --build --scale shelf-worker=2
+```
+
+В промышленной схеме SQLite-очередь заменяется на RabbitMQ/Kafka/SQS, `runtime` — на S3/MinIO, а SQLite с результатами — на PostgreSQL или ClickHouse. Контракт задач уже вынесен отдельно, поэтому это развитие не требует менять OCR/pipeline.
+
 ## Почему решение масштабируется
 
 Pipeline естественно раскладывается на map-reduce:
@@ -308,7 +341,7 @@ CPU-only режим технически возможен для части pipe
 
 ```text
 .
-├── web/                 # UI, API, jobs, metrics, SQLite writer
+├── web/                 # UI, API, jobs, metrics, SQLite writer, worker process
 ├── pipeline/            # inference/training pipeline без весов и датасетов
 ├── artifacts/           # локальные внешние артефакты, не коммитятся
 ├── tools/               # проверки окружения
@@ -321,7 +354,8 @@ CPU-only режим технически возможен для части pipe
 ## Проверки
 
 ```bash
-python -m py_compile web/server.py
+python -m py_compile web/server.py web/worker.py web/worker_queue.py tools/test_worker_queue.py
+python tools/test_worker_queue.py
 node --check web/app.js
 python -m compileall pipeline/scripts
 python tools/check_artifacts.py

@@ -22,6 +22,8 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from worker_queue import enqueue_task, get_task_by_source_job, init_queue_db, queue_summary
+
 
 WEB_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = WEB_ROOT.parent
@@ -43,6 +45,9 @@ JOBS_ROOT = Path(os.environ.get("LENTA_WEB_JOBS_ROOT", str(RUNTIME_ROOT / "jobs"
 UNCERTAIN_ROOT = Path(os.environ.get("LENTA_UNCERTAIN_ROOT", str(RUNTIME_ROOT / "uncertain_predictions")))
 RETRAIN_CONFIG_PATH = Path(os.environ.get("LENTA_RETRAIN_CONFIG", str(RUNTIME_ROOT / "retrain_config.json")))
 RESULTS_DB = Path(os.environ.get("LENTA_RESULTS_DB", str(RUNTIME_ROOT / "lenta_results.sqlite")))
+WORKER_QUEUE_DB = Path(os.environ.get("LENTA_WORKER_QUEUE_DB", str(RUNTIME_ROOT / "worker_queue.sqlite")))
+JOB_EXECUTION_MODE = os.environ.get("LENTA_JOB_EXECUTION_MODE", "local").strip().lower()
+QUEUE_MODE_ENABLED = JOB_EXECUTION_MODE in {"queue", "worker", "workers", "distributed"}
 A_CATALOG = Path("A:/lenta_data/db_hack.csv")
 DEFAULT_CATALOG = Path(os.environ.get("LENTA_CATALOG_PATH", str(A_CATALOG if A_CATALOG.exists() else PROJECT_ROOT / "db_hack.csv")))
 SAMPLE_CSV = PROJECT_ROOT / "Данные" / "sample.csv"
@@ -81,6 +86,7 @@ JOBS: dict[str, dict[str, object]] = {}
 JOBS_LOCK = threading.Lock()
 PIPELINE_LOCK = threading.Lock()
 DB_LOCK = threading.Lock()
+JOB_STATE_FILENAME = "state.json"
 
 
 def json_bytes(payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> tuple[int, bytes, str]:
@@ -741,15 +747,41 @@ def eta_range(seconds: float, progress: float) -> tuple[int, int]:
 
 
 def set_job_state(job_id: str, **updates: object) -> None:
+    updates.setdefault("updated_at", time.time())
     with JOBS_LOCK:
         job = JOBS.setdefault(job_id, {})
         job.update(updates)
+        snapshot = dict(job)
+    job_root_value = snapshot.get("job_root", "")
+    if job_root_value:
+        try:
+            state_path = Path(str(job_root_value)) / JOB_STATE_FILENAME
+            write_json(state_path, snapshot)
+        except OSError:
+            pass
+
+
+def load_job_state_from_disk(job_id: str) -> dict[str, object] | None:
+    state_path = JOBS_ROOT / job_id / JOB_STATE_FILENAME
+    if not state_path.exists():
+        return None
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    with JOBS_LOCK:
+        JOBS[job_id] = dict(payload)
+    return dict(payload)
 
 
 def get_job_state(job_id: str) -> dict[str, object] | None:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
-        return dict(job) if job is not None else None
+        if job is not None:
+            return dict(job)
+    return load_job_state_from_disk(job_id)
 
 
 def get_live_job(job_id: str) -> dict[str, object] | None:
@@ -886,11 +918,39 @@ def write_upload_chunk(job_id: str, upload_id: str, offset: int, body: bytes) ->
     return {"received": current_size, "complete": is_complete}
 
 
+def enqueue_inference_task(job_id: str, uploads: list[Path], job_root: Path, outputs_dir: Path, started: float) -> str:
+    payload = {
+        "job_id": job_id,
+        "uploads": [str(path) for path in uploads],
+        "job_root": str(job_root),
+        "outputs_dir": str(outputs_dir),
+        "started": started,
+    }
+    return enqueue_task(
+        WORKER_QUEUE_DB,
+        "video_inference",
+        payload,
+        source_job_id=job_id,
+        priority=100,
+        max_attempts=2,
+        task_id=f"video_inference_{job_id}",
+    )
+
+
 def start_uploaded_job(job_id: str) -> dict[str, object]:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is None:
             raise KeyError("Job not found")
+        if QUEUE_MODE_ENABLED and job.get("queue_task_id"):
+            return {
+                "job_id": job_id,
+                "status": "queued",
+                "execution_mode": "queue",
+                "queue_task_id": str(job.get("queue_task_id", "")),
+                "status_url": f"/api/jobs/{job_id}/status",
+                "csv_url": f"/api/jobs/{job_id}/csv",
+            }
         if str(job.get("status", "")) not in {"uploading", "queued"}:
             raise ValueError("Job cannot be started")
         upload_files = [dict(item) for item in job.get("upload_files", []) if isinstance(item, dict)]
@@ -921,6 +981,24 @@ def start_uploaded_job(job_id: str) -> dict[str, object]:
         rows=0,
     )
     upsert_job_record(job_id, status="queued", created_at=started, total_videos=len(uploads), job_root=str(job_root))
+    if QUEUE_MODE_ENABLED:
+        task_id = enqueue_inference_task(job_id, uploads, job_root, outputs_dir, started)
+        set_job_state(
+            job_id,
+            status="queued",
+            execution_mode="queue",
+            queue_task_id=task_id,
+            stage="В очереди worker",
+            detail="Ожидаем свободный обработчик",
+        )
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "execution_mode": "queue",
+            "queue_task_id": task_id,
+            "status_url": f"/api/jobs/{job_id}/status",
+            "csv_url": f"/api/jobs/{job_id}/csv",
+        }
     worker = threading.Thread(
         target=run_job,
         args=(job_id, uploads, job_root, outputs_dir, started),
@@ -940,8 +1018,31 @@ def build_job_status(job_id: str) -> dict[str, object] | None:
     job = get_job_state(job_id)
     if job is None:
         return None
+    if str(job.get("execution_mode", "")) == "queue":
+        disk_job = load_job_state_from_disk(job_id)
+        if disk_job and float(disk_job.get("updated_at", 0) or 0) >= float(job.get("updated_at", 0) or 0):
+            job = disk_job
 
     status = str(job.get("status", "queued"))
+    queue_task = None
+    if str(job.get("execution_mode", "")) == "queue":
+        try:
+            queue_task = get_task_by_source_job(WORKER_QUEUE_DB, job_id)
+        except sqlite3.Error:
+            queue_task = None
+        if queue_task and status not in {"done", "failed"}:
+            task_status = str(queue_task.get("status", ""))
+            if task_status == "running":
+                status = "running"
+                job["status"] = "running"
+                job.setdefault("stage", "Worker обрабатывает видео")
+                worker_id = str(queue_task.get("lease_owner", ""))
+                if worker_id:
+                    job.setdefault("detail", f"Задачу забрал {worker_id}")
+            elif task_status == "failed":
+                status = "failed"
+                job["status"] = "failed"
+                job["error"] = str(queue_task.get("error", "Worker task failed"))
     total_videos = max(1, int(job.get("total_videos", 1)))
     completed_videos = max(0, int(job.get("completed_videos", 0)))
     current_index = max(1, int(job.get("current_video_index", min(total_videos, completed_videos + 1))))
@@ -1002,6 +1103,10 @@ def build_job_status(job_id: str) -> dict[str, object] | None:
         "review_url": f"/api/jobs/{job_id}/review" if status == "done" else "",
         "review_html_url": f"/api/jobs/{job_id}/review.html" if status == "done" else "",
         "review_zip_url": f"/api/jobs/{job_id}/review.zip" if status == "done" else "",
+        "execution_mode": str(job.get("execution_mode", "local")),
+        "queue_task_id": str(job.get("queue_task_id", "")),
+        "queue_task_status": str(queue_task.get("status", "")) if queue_task else "",
+        "queue_worker": str(queue_task.get("lease_owner", "")) if queue_task else "",
         "review_count": int(job.get("review_count", 0)),
         "uncertain_count": int(job.get("uncertain_count", 0)),
         "auto_retrain_enabled": bool(ensure_retrain_config().get("enabled", False)),
@@ -1463,8 +1568,21 @@ class LentaHandler(SimpleHTTPRequestHandler):
                     "uncertain_root": str(UNCERTAIN_ROOT),
                     "auto_retrain_enabled": bool(ensure_retrain_config().get("enabled", False)),
                     "results_db": str(RESULTS_DB),
+                    "execution_mode": "queue" if QUEUE_MODE_ENABLED else "local",
+                    "worker_queue_db": str(WORKER_QUEUE_DB),
                     "checkpoint": str(checkpoint),
                     "catalog": str(DEFAULT_CATALOG),
+                }
+            )
+            self.send_payload(status, payload, content_type)
+            return
+        if path == "/api/queue":
+            status, payload, content_type = json_bytes(
+                {
+                    "enabled": QUEUE_MODE_ENABLED,
+                    "execution_mode": "queue" if QUEUE_MODE_ENABLED else "local",
+                    "queue_db": str(WORKER_QUEUE_DB),
+                    "summary": queue_summary(WORKER_QUEUE_DB),
                 }
             )
             self.send_payload(status, payload, content_type)
@@ -1695,17 +1813,30 @@ class LentaHandler(SimpleHTTPRequestHandler):
                 total_videos=len(uploads),
                 job_root=str(job_root),
             )
-            worker = threading.Thread(
-                target=run_job,
-                args=(job_id, uploads, job_root, outputs_dir, started),
-                daemon=True,
-                name=f"lenta-job-{job_id}",
-            )
-            worker.start()
+            task_id = ""
+            if QUEUE_MODE_ENABLED:
+                task_id = enqueue_inference_task(job_id, uploads, job_root, outputs_dir, started)
+                set_job_state(
+                    job_id,
+                    execution_mode="queue",
+                    queue_task_id=task_id,
+                    stage="В очереди worker",
+                    detail="Ожидаем свободный обработчик",
+                )
+            else:
+                worker = threading.Thread(
+                    target=run_job,
+                    args=(job_id, uploads, job_root, outputs_dir, started),
+                    daemon=True,
+                    name=f"lenta-job-{job_id}",
+                )
+                worker.start()
             status, payload, content_type = json_bytes(
                 {
                     "job_id": job_id,
                     "status": "queued",
+                    "execution_mode": "queue" if QUEUE_MODE_ENABLED else "local",
+                    "queue_task_id": task_id,
                     "status_url": f"/api/jobs/{job_id}/status",
                     "csv_url": f"/api/jobs/{job_id}/csv",
                 },
@@ -1749,11 +1880,13 @@ def main() -> None:
     args = parser.parse_args()
 
     init_results_db()
+    init_queue_db(WORKER_QUEUE_DB)
     prune_old_jobs()
     httpd = ThreadingHTTPServer((args.host, args.port), LentaHandler)
     print(f"Serving Lenta web inference on http://{args.host}:{args.port}")
     print(f"Pipeline root: {PIPELINE_ROOT}")
     print(f"Detector checkpoint: {choose_checkpoint()}")
+    print(f"Execution mode: {'queue' if QUEUE_MODE_ENABLED else 'local'}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
