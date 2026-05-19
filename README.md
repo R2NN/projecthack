@@ -6,11 +6,13 @@ Shelf Vision принимает MP4-видео прохода робота вд�
 
 Демо-стенд:
 
-https://contacting-usb-candles-dollars.trycloudflare.com
+https://adapters-flower-tray-makes.trycloudflare.com
+
+Ссылка работает через Cloudflare quick tunnel и может меняться при выключении компьютера, перезапуске или сбое туннеля. Если ссылка не открывается, настоятельно прошу написать в Telegram: [@rktqq](https://t.me/rktqq).
 
 Health check:
 
-https://contacting-usb-candles-dollars.trycloudflare.com/api/health
+https://adapters-flower-tray-makes.trycloudflare.com/api/health
 
 ## Коротко
 

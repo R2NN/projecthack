@@ -122,6 +122,11 @@ function Copy-MinimalZones {
 $VideoPath = Resolve-RequiredPath $VideoPath "VideoPath"
 $Python = Resolve-ExecutablePath $Python "Python"
 $TesseractExe = Resolve-ExecutablePath $TesseractExe "Tesseract"
+$PythonDir = Split-Path -Parent $Python
+if (![string]::IsNullOrWhiteSpace($PythonDir)) {
+  $env:PATH = "$PythonDir$([System.IO.Path]::PathSeparator)$env:PATH"
+  $env:PYTHONEXECUTABLE = $Python
+}
 if ([string]::IsNullOrWhiteSpace($DetectorCheckpoint)) {
   $AllDataCheckpoint = Join-Path $Root "models\rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth"
   $HoldoutCheckpoint = Join-Path $Root "models\rfdetr_small_price_tag_except_26_12_20_tiled1280_e8_checkpoint_best_total.pth"

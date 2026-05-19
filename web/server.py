@@ -1189,6 +1189,9 @@ def run_pipeline(video_path: Path, video_id: str, run_root: Path, log_path: Path
     env.setdefault("PYTHONIOENCODING", "utf-8")
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONUNBUFFERED", "1")
+    pipeline_python_dir = str(Path(pipeline_python).resolve().parent)
+    env["PATH"] = pipeline_python_dir + os.pathsep + env.get("PATH", "")
+    env["PYTHONEXECUTABLE"] = pipeline_python
 
     with log_path.open("w", encoding="utf-8", errors="replace") as log:
         log.write(" ".join(command) + "\n\n")
