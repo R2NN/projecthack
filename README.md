@@ -6,11 +6,11 @@ Shelf Vision принимает MP4-видео прохода робота вд�
 
 Демо-стенд:
 
-https://got-accept-side-wing.trycloudflare.com
+https://contacting-usb-candles-dollars.trycloudflare.com
 
 Health check:
 
-https://got-accept-side-wing.trycloudflare.com/api/health
+https://contacting-usb-candles-dollars.trycloudflare.com/api/health
 
 ## Коротко
 

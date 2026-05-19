@@ -32,7 +32,11 @@ LOCAL_PIPELINE_ROOT = PROJECT_ROOT / "handoff_v19_speed_full_pipeline_20260518_0
 PIPELINE_ROOT = Path(os.environ.get("LENTA_PIPELINE_ROOT", str(A_PIPELINE_ROOT if A_PIPELINE_ROOT.exists() else LOCAL_PIPELINE_ROOT)))
 PIPELINE_SCRIPT = Path(os.environ.get("LENTA_PIPELINE_SCRIPT", str(PIPELINE_ROOT / "run_inference_no_ensemble.ps1")))
 PIPELINE_POWERSHELL = os.environ.get("LENTA_POWERSHELL", "powershell.exe" if sys.platform == "win32" else "pwsh")
-PIPELINE_PYTHON = os.environ.get("LENTA_PIPELINE_PYTHON", sys.executable)
+DEFAULT_PIPELINE_PYTHON = Path("A:/rfdetr_envs/lenta-rfdetr-gpu/Scripts/python.exe")
+PIPELINE_PYTHON = os.environ.get(
+    "LENTA_PIPELINE_PYTHON",
+    str(DEFAULT_PIPELINE_PYTHON if sys.platform == "win32" and DEFAULT_PIPELINE_PYTHON.exists() else sys.executable),
+)
 DEFAULT_TESSERACT_EXE = Path("A:/tesseract_env/Library/bin/tesseract.exe")
 DEFAULT_TESSDATA_DIR = Path("A:/tesseract_env/Library/share/tessdata")
 TESSERACT_EXE = os.environ.get(
@@ -1608,6 +1612,9 @@ class LentaHandler(SimpleHTTPRequestHandler):
                     "results_db": str(RESULTS_DB),
                     "execution_mode": "queue" if QUEUE_MODE_ENABLED else "local",
                     "worker_queue_db": str(WORKER_QUEUE_DB),
+                    "pipeline_python": resolve_executable(PIPELINE_PYTHON),
+                    "tesseract": resolve_executable(TESSERACT_EXE),
+                    "tessdata": str(TESSDATA_DIR),
                     "checkpoint": str(checkpoint),
                     "catalog": str(DEFAULT_CATALOG),
                 }
