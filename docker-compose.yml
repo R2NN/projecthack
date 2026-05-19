@@ -1,0 +1,14 @@
+services:
+  shelf-vision:
+    build:
+      context: .
+      args:
+        INSTALL_PIPELINE_DEPS: ${INSTALL_PIPELINE_DEPS:-false}
+    ports:
+      - "5173:5173"
+    env_file:
+      - .env.example
+    volumes:
+      - ./runtime:/runtime
+      - ./artifacts:/artifacts:ro
+    restart: unless-stopped

@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Runtime
+runtime/
+jobs/
+logs/
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+public_url.txt
+
+# Local artifacts and data
+artifacts/*
+!artifacts/README.md
+!artifacts/.gitkeep
+pipeline/models/*
+!pipeline/models/.gitkeep
+pipeline/runs/
+pipeline/datasets/
+pipeline/repro_outputs/
+pipeline/data/db_hack.csv
+pipeline/data/**/*.mp4
+pipeline/data/**/*.avi
+pipeline/data/**/*.mov
+*.mp4
+*.avi
+*.mov
+
+# Large model/checkpoint files
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.engine
+
+# Archives and challenge handouts
+*.zip
+*.7z
+*.rar
+*.pdf
+*.ppt
+*.pptx
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

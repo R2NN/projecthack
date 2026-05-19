@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Прототип интерфейса Lenta Tech для загрузки MP4-видео робота и выгрузки CSV с распознанными ценниками."
+    />
+    <title>Полка под контролем | Lenta Tech</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="splash-screen" aria-hidden="true">
+      <div class="splash-glow"></div>
+      <div class="splash-logo splash-logo-text">Shelf Vision</div>
+      <div class="splash-line"></div>
+    </div>
+
+    <div class="page-shell">
+      <main id="top">
+        <section class="hero-section" aria-labelledby="hero-title">
+          <div class="aurora" aria-hidden="true"></div>
+          <div class="pixel-field pixel-field-top" aria-hidden="true"></div>
+          <div class="pixel-field pixel-field-bottom" aria-hidden="true"></div>
+          <div class="orbital-layer" aria-hidden="true">
+            <span class="floating-tag tag-one">
+              <span></span>
+            </span>
+            <span class="floating-tag tag-two">
+              <span></span>
+            </span>
+            <span class="floating-tag tag-three">
+              <span></span>
+            </span>
+            <span class="scan-beam"></span>
+            <span class="data-dot dot-one"></span>
+            <span class="data-dot dot-two"></span>
+            <span class="data-dot dot-three"></span>
+          </div>
+
+          <div class="hero-content">
+            <div class="hero-copy">
+              <p class="eyebrow">Lenta Tech shelf vision</p>
+              <h1 id="hero-title">
+                <span>Полка</span>
+                <span>под</span>
+                <span>контролем</span>
+              </h1>
+              <p class="hero-lead">
+                Загрузите видео прохода робота вдоль стеллажа, проверьте материалы
+                в превью и получите готовый CSV с найденными ценниками для контроля
+                полки.
+              </p>
+            </div>
+
+            <section class="upload-card" id="upload-card" aria-labelledby="upload-title">
+              <div class="card-heading">
+                <h2 id="upload-title">Загрузка видео</h2>
+              </div>
+
+              <div
+                class="dropzone"
+                id="dropzone"
+                role="button"
+                tabindex="0"
+                aria-label="Перетащите MP4-файл или выберите видео"
+              >
+                <input id="video-input" type="file" accept="video/mp4,.mp4" multiple />
+                <div class="dropzone-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false">
+                    <path d="M12 3v10m0-10 4 4m-4-4L8 7" />
+                    <path d="M4 15v3a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-3" />
+                  </svg>
+                </div>
+                <p class="dropzone-title">Перетащите MP4 сюда</p>
+                <p class="dropzone-subtitle">можно загрузить сразу несколько видео</p>
+                <button class="secondary-button" id="pick-file" type="button">
+                  Выбрать файлы
+                </button>
+              </div>
+
+              <div class="error-message" id="error-message" role="alert" hidden></div>
+
+              <div class="files-panel" id="files-panel" hidden>
+                <div class="files-header">
+                  <span id="files-count">0 видео</span>
+                  <button class="text-button" id="clear-files" type="button">Очистить</button>
+                </div>
+                <ul class="file-list" id="file-list" aria-label="Загруженные видео"></ul>
+              </div>
+
+              <div class="video-preview" id="video-preview" hidden>
+                <div class="preview-toolbar">
+                  <span>Предпросмотр видео</span>
+                  <button class="preview-toggle" id="toggle-preview" type="button" aria-expanded="true">
+                    Скрыть
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="m6 9 6 6 6-6" />
+                    </svg>
+                  </button>
+                </div>
+                <div class="preview-body">
+                  <video id="preview-video" controls muted playsinline></video>
+                  <button class="preview-open" id="open-preview" type="button">Открыть крупно</button>
+                  <p id="preview-caption"></p>
+                </div>
+              </div>
+
+              <div class="processing-panel" id="processing-panel" hidden aria-live="polite">
+                <div class="loader" aria-hidden="true"></div>
+                <div>
+                  <strong id="processing-title">Распознаем ценники</strong>
+                  <span id="processing-text">Подготавливаем кадры робота</span>
+                </div>
+                <div class="inline-progress" aria-hidden="true">
+                  <span id="progress-bar"></span>
+                </div>
+              </div>
+
+              <div class="notice-row" id="notice-row" role="status" aria-live="polite">
+                <span class="notice-dot" aria-hidden="true"></span>
+                <span id="notice-text">Видео ожидает загрузки</span>
+              </div>
+
+              <button class="run-button" id="run-button" type="button" disabled>
+                Запустить распознавание
+              </button>
+              <a class="download-button disabled" id="download-csv" download href="#" aria-disabled="true" hidden>
+                Скачать CSV
+              </a>
+              <a class="download-button disabled" id="download-review" target="_blank" rel="noreferrer" href="#" aria-disabled="true" hidden>
+                Открыть HTML-отчет
+              </a>
+              <a class="download-button disabled" id="download-review-zip" download href="#" aria-disabled="true" hidden>
+                Скачать ревью ZIP
+              </a>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="video-modal" id="video-modal" aria-hidden="true">
+      <div class="video-modal-backdrop" id="video-modal-backdrop"></div>
+      <div class="video-modal-dialog" role="dialog" aria-modal="true" aria-label="Предпросмотр видео">
+        <button class="modal-close" id="modal-close" type="button" aria-label="Закрыть предпросмотр">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
+        <video id="modal-video" controls playsinline></video>
+      </div>
+    </div>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>
