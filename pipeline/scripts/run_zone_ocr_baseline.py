@@ -5,19 +5,27 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import re
 import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import cv2
 import numpy as np
+
+
+# Shelf labels print discount as an integer percent after dropping the
+# fractional part. For reverse-calculating regular price from card price, +0.5
+# percentage points is the least-biased midpoint estimate of the hidden fraction
+# in [printed_discount, printed_discount + 1).
+DISCOUNT_FLOOR_COMPENSATION_PERCENT = 0.5
 
 
 OUTPUT_COLUMNS = [
@@ -611,13 +619,46 @@ def is_valid_price(value: str) -> bool:
         return False
 
 
+def parse_discount_from_text(value: Any) -> tuple[int | None, float]:
+    text = latinize_digit_noise(str(value or ""))
+    clean = re.search(r"(?<!\d)-?\s*(\d{1,2})\s*%(?!\d)", text)
+    if clean:
+        percent = int(clean.group(1))
+        if 1 <= percent <= 90:
+            return percent, 0.0
+
+    noisy = re.search(r"(?<!\d)([1-6]\d)9\s*%(?!\d)", text)
+    if noisy:
+        percent = int(noisy.group(1))
+        if 10 <= percent <= 69:
+            return percent, 0.35
+    return None, 0.0
+
+
+def discount_plausibility_penalty(percent: int | None) -> float:
+    if percent is None:
+        return 0.0
+    percent = abs(int(percent))
+    if percent <= 70:
+        return 0.0
+    if percent <= 80:
+        return 0.45 + (percent - 70) * 0.03
+    return 1.20 + (percent - 80) * 0.12
+
+
+def parse_discount_candidate(value: Any, source_text: Any = "") -> tuple[int | None, float]:
+    source_percent, source_penalty = parse_discount_from_text(source_text)
+    if source_percent is not None:
+        return source_percent, source_penalty
+    return parse_discount_from_text(value)
+
+
 def extract_discount(source_text: str) -> tuple[str, bool, float]:
-    text = latinize_digit_noise(source_text)
-    match = re.search(r"-?\s*(\d{1,2})\s*%", text)
-    if not match:
+    percent, parse_penalty = parse_discount_candidate("", source_text)
+    if percent is None:
         return "", False, 0.0
-    value = f"-{int(match.group(1))}%"
-    return value, True, 0.9
+    confidence = max(0.25, 0.9 - parse_penalty - discount_plausibility_penalty(percent) * 0.2)
+    return f"-{percent}%", True, confidence
 
 
 def extract_barcode(source_text: str) -> tuple[str, bool, float]:
@@ -1042,17 +1083,46 @@ def aggregate_submission(
         track_id = template.get("track_id", "")
         if not track_id:
             track_id = template.get("track_id_export", "")
+        selected_timestamp = template.get("frame_timestamp", "")
+        discount_best = select_best_candidate(
+            "discount_amount",
+            grouped.get((video_id, track_id, "discount_amount"), []),
+            selected_timestamp,
+        )
+        discount_percent = parse_discount_percent_value(discount_best.value if discount_best else "")
+        price_card_best = select_best_candidate(
+            "price_card",
+            grouped.get((video_id, track_id, "price_card"), []),
+            selected_timestamp,
+            discount_percent,
+        )
+        price_card_value, _ = parse_candidate_price(price_card_best.value if price_card_best else "")
         for field in OUTPUT_COLUMNS:
             if field in {"filename", "frame_timestamp", "x_min", "y_min", "x_max", "y_max"}:
                 continue
             choices = grouped.get((video_id, track_id, field), [])
             if not choices:
                 continue
-            best = select_best_candidate(field, choices)
+            if field == "price_card":
+                best = price_card_best
+            else:
+                best = select_best_candidate(field, choices, selected_timestamp, discount_percent, price_card_value)
             if best is None:
                 continue
             row[field] = output_value_for_field(field, best.value)
             debug_rows.append(candidate_to_row(best))
+        if not row.get("price_default") and price_card_value is not None and discount_percent is not None:
+            inferred_default = infer_default_from_card_discount(price_card_value, discount_percent)
+            if inferred_default is not None:
+                row["price_default"] = f"{inferred_default:.2f}"
+                if not row.get("price1_qr"):
+                    row["price1_qr"] = f"{inferred_default:.2f}"
+        if not row.get("discount_amount"):
+            card_for_discount, _ = parse_candidate_price(row.get("price_card", ""))
+            default_for_discount, _ = parse_candidate_price(row.get("price_default", ""))
+            inferred_discount = infer_discount_from_prices(card_for_discount, default_for_discount)
+            if inferred_discount:
+                row["discount_amount"] = inferred_discount
         output_rows.append(row)
     return output_rows, debug_rows
 
@@ -1063,17 +1133,165 @@ def output_value_for_field(field: str, value: str) -> str:
     return value
 
 
-def select_best_candidate(field: str, choices: list[FieldCandidate]) -> FieldCandidate | None:
+def parse_candidate_price(value: str) -> tuple[float | None, bool]:
+    text = str(value or "").strip().replace(",", ".")
+    match = re.search(r"\d+(?:\.\d+)?", text)
+    if not match:
+        return None, False
+    token = match.group(0)
+    try:
+        return float(token), "." in token
+    except ValueError:
+        return None, "." in token
+
+
+def normalize_shelf_price(value: float) -> float:
+    return max(0.0, int(value) + 0.99)
+
+
+def closest_price_with_cents(value: float, endings: tuple[int, ...]) -> float:
+    base = math.floor(value)
+    candidates: list[float] = []
+    for integer_part in range(max(0, base - 1), base + 2):
+        for cents in endings:
+            candidates.append(integer_part + cents / 100.0)
+    return min(candidates, key=lambda candidate: abs(candidate - value))
+
+
+def infer_default_from_card_discount(card_value: float | None, discount_percent: int | None) -> float | None:
+    if card_value is None or discount_percent is None:
+        return None
+    displayed_percent = abs(float(discount_percent))
+    if displayed_percent < 5.0 or displayed_percent > 70.0:
+        return None
+    adjusted_percent = displayed_percent + DISCOUNT_FLOOR_COMPENSATION_PERCENT
+    factor = 1.0 - adjusted_percent / 100.0
+    if factor < 0.10 or factor >= 1.0:
+        return None
+    inferred = float(card_value) / factor
+    if inferred <= float(card_value) * 1.02 or inferred > 20000.0:
+        return None
+    return closest_price_with_cents(inferred, (9, 19, 29, 39, 49, 59, 69, 79, 89, 99))
+
+
+def infer_discount_from_prices(card_value: float | None, default_value: float | None) -> str:
+    if card_value is None or default_value is None:
+        return ""
+    card = float(card_value)
+    default = float(default_value)
+    if default <= card * 1.02 or default > card * 4.0:
+        return ""
+    raw_percent = (1.0 - card / default) * 100.0
+    percent = int(math.floor(raw_percent + 1e-9))
+    if 5 <= percent <= 70:
+        return f"-{percent}%"
+    return ""
+
+
+def max_digit_run(text: str) -> int:
+    return max((len(run) for run in re.findall(r"\d+", text or "")), default=0)
+
+
+def has_price_marker(text: str) -> bool:
+    return bool(re.search(r"[\u00b0\u00ba]|(?:^|\s)99(?:\s|$)|rub", text or "", re.IGNORECASE))
+
+
+def parse_discount_percent_value(value: str) -> int | None:
+    percent, _ = parse_discount_candidate(value)
+    return percent
+
+
+def discount_fragment_penalty(
+    field: str,
+    value: float,
+    source_text: str,
+    atom_kind: str,
+    discount_percent: int | None,
+) -> float:
+    if field not in {"price_card", "price_discount"}:
+        return 0.0
+    whole = str(int(value))
+    source = source_text or ""
+    penalty = 0.0
+
+    if discount_percent is not None:
+        discount_digits = str(abs(discount_percent))
+        if len(discount_digits) >= 2 and whole.startswith(discount_digits) and len(whole) > len(discount_digits):
+            penalty += 0.95
+            if atom_kind in {"source_99", "parser_value"}:
+                penalty += 0.25
+
+    for match in re.finditer(r"(?<!\d)(\d{2})\s*[#%]\s*(\d)(?!\d)", source):
+        if whole.startswith(match.group(1) + match.group(2)):
+            penalty += 1.35
+
+    return penalty
+
+
+def source_price_atoms(text: str) -> list[tuple[float, str]]:
+    atoms: list[tuple[float, str]] = []
+    for match in re.finditer(r"(?<!\d)(\d{2,4})\s*[\u00b0\u00ba]\s*(\d{2})?(?!\d)", text or ""):
+        whole = int(match.group(1))
+        cents = int(match.group(2)) if match.group(2) and 0 <= int(match.group(2)) <= 99 else 99
+        if 10 <= whole <= 9999:
+            atoms.append((whole + cents / 100.0, "source_marker"))
+    for match in re.finditer(r"(?<!\d)(\d{2,4})\s+99(?!\d)", text or ""):
+        whole = int(match.group(1))
+        if 10 <= whole <= 9999:
+            atoms.append((whole + 0.99, "source_99"))
+    return atoms
+
+
+def timestamp_price_bonus(candidate: FieldCandidate, selected_timestamp_ms: str | None) -> tuple[float, int]:
+    try:
+        diff = abs(int(float(candidate.timestamp_ms or 0)) - int(float(selected_timestamp_ms or 0)))
+    except (TypeError, ValueError):
+        return 0.0, 10**9
+    if diff <= 250:
+        return 0.36, diff
+    if diff <= 500:
+        return 0.25, diff
+    if diff <= 1000:
+        return 0.05, diff
+    if diff <= 2000:
+        return -0.22, diff
+    if diff <= 4000:
+        return -0.48, diff
+    return -0.85, diff
+
+
+def reject_price_atom(field: str, value: float, source_text: str, explicit_decimal: bool) -> bool:
+    if value < 10.0 or value > 9999.0:
+        return True
+    if field in {"price_card", "price_discount"} and value > 5000.0 and not has_price_marker(source_text):
+        return True
+    if explicit_decimal and max_digit_run(source_text) >= 5 and not re.search(r"[,.]", source_text or ""):
+        return True
+    if field in {"price_card", "price_discount"} and explicit_decimal and value < 200.0:
+        whole = int(value)
+        if re.search(rf"(?<!\d){whole}\d\s*[\u00b0\u00ba]", source_text or ""):
+            return True
+    return False
+
+
+def select_best_candidate(
+    field: str,
+    choices: list[FieldCandidate],
+    selected_timestamp_ms: str | None = None,
+    discount_percent: int | None = None,
+    card_value: float | None = None,
+) -> FieldCandidate | None:
+    if not choices:
+        return None
     if field in {"price_default", "price_card", "price_discount"}:
         valid_choices = [choice for choice in choices if choice.valid and is_valid_price(choice.value)]
         if valid_choices:
-            if field in {"price_card", "price_discount"}:
-                decimal_choices = [
-                    choice for choice in valid_choices if "." in choice.value and float(choice.value) >= 100.0
-                ]
-                if decimal_choices:
-                    valid_choices = decimal_choices
-            return select_consensus_price(valid_choices)
+            return select_consensus_price(field, valid_choices, selected_timestamp_ms, discount_percent, card_value)
+    if field == "discount_amount":
+        valid_choices = [choice for choice in choices if choice.valid]
+        if valid_choices:
+            return select_consensus_discount(valid_choices, selected_timestamp_ms)
+        return None
     if field == "barcode":
         valid_choices = [choice for choice in choices if choice.valid and len(re.sub(r"\D", "", choice.value)) == 13]
         if valid_choices:
@@ -1082,19 +1300,105 @@ def select_best_candidate(field: str, choices: list[FieldCandidate]) -> FieldCan
     return max(choices, key=lambda candidate: candidate.score)
 
 
-def select_consensus_price(choices: list[FieldCandidate]) -> FieldCandidate:
-    grouped: dict[str, list[FieldCandidate]] = defaultdict(list)
+def select_consensus_price(
+    field: str,
+    choices: list[FieldCandidate],
+    selected_timestamp_ms: str | None = None,
+    discount_percent: int | None = None,
+    card_value: float | None = None,
+) -> FieldCandidate | None:
+    grouped: dict[str, list[tuple[FieldCandidate, float]]] = defaultdict(list)
     for choice in choices:
-        grouped[choice.value].append(choice)
+        time_bonus, _ = timestamp_price_bonus(choice, selected_timestamp_ms)
+        common_score = choice.score + time_bonus
+        if choice.image_kind == "tight_enhanced":
+            common_score += 0.02
+        if choice.engine == "rapidocr":
+            common_score += 0.02
+        if has_price_marker(choice.source_text):
+            common_score += 0.08
 
-    def price_value_score(value: str, value_choices: list[FieldCandidate]) -> float:
-        best_score = max(choice.score for choice in value_choices)
-        support = len(value_choices) * 0.07
-        cents_bonus = 0.06 if value.endswith(".99") else 0.0
-        return best_score + support + cents_bonus
+        for source_value, kind in source_price_atoms(choice.source_text):
+            normalized = normalize_shelf_price(source_value)
+            if reject_price_atom(field, normalized, choice.source_text, False):
+                continue
+            if field == "price_default" and card_value is not None and normalized <= card_value * 1.02:
+                continue
+            discount_penalty = discount_fragment_penalty(field, normalized, choice.source_text, kind, discount_percent)
+            grouped[f"{normalized:.2f}"].append(
+                (
+                    replace(choice, value=f"{normalized:.2f}"),
+                    common_score + (0.44 if kind == "source_marker" else 0.34) - discount_penalty,
+                )
+            )
+
+        parsed, explicit_decimal = parse_candidate_price(choice.value)
+        if parsed is None:
+            continue
+        normalized = normalize_shelf_price(parsed)
+        if reject_price_atom(field, normalized, choice.source_text, explicit_decimal):
+            continue
+        if field == "price_default" and card_value is not None and normalized <= card_value * 1.02:
+            continue
+        score = common_score
+        if explicit_decimal and field in {"price_card", "price_discount"} and abs(parsed - normalized) > 0.02:
+            score -= 0.28
+        if max_digit_run(choice.source_text) >= 5 and not re.search(r"[\u00b0\u00ba]|\s99(?!\d)", choice.source_text):
+            score -= 0.45
+        if normalized > 5000.0:
+            score -= 1.0
+        elif normalized > 3000.0:
+            score -= 0.35
+        score -= discount_fragment_penalty(field, normalized, choice.source_text, "parser_value", discount_percent)
+        grouped[f"{normalized:.2f}"].append((replace(choice, value=f"{normalized:.2f}"), score))
+
+    if not grouped:
+        return None
+
+    def price_value_score(value: str, value_choices: list[tuple[FieldCandidate, float]]) -> float:
+        best_score = max(score for _, score in value_choices)
+        support = min(len(value_choices), 8) * 0.07
+        timestamps = {candidate.timestamp_ms for candidate, _ in value_choices}
+        close_support = sum(
+            1 for candidate, _ in value_choices if timestamp_price_bonus(candidate, selected_timestamp_ms)[1] <= 500
+        )
+        marker_support = sum(
+            1 for candidate, _ in value_choices if has_price_marker(candidate.source_text)
+        )
+        return best_score + support + min(len(timestamps), 4) * 0.05 + min(close_support, 4) * 0.10 + min(marker_support, 4) * 0.04
 
     best_value = max(grouped, key=lambda value: price_value_score(value, grouped[value]))
-    return max(grouped[best_value], key=lambda candidate: candidate.score)
+    return max(grouped[best_value], key=lambda item: item[1])[0]
+
+
+def select_consensus_discount(
+    choices: list[FieldCandidate],
+    selected_timestamp_ms: str | None = None,
+) -> FieldCandidate | None:
+    grouped: dict[str, list[tuple[FieldCandidate, float]]] = defaultdict(list)
+    for choice in choices:
+        percent, parse_penalty = parse_discount_candidate(choice.value, choice.source_text)
+        if percent is None:
+            continue
+        time_bonus, _ = timestamp_price_bonus(choice, selected_timestamp_ms)
+        score = choice.score + time_bonus - parse_penalty - discount_plausibility_penalty(percent)
+        if choice.image_kind == "tight_enhanced":
+            score += 0.05
+        grouped[f"-{percent}%"].append((replace(choice, value=f"-{percent}%"), score))
+
+    if not grouped:
+        return None
+
+    def discount_score(value_choices: list[tuple[FieldCandidate, float]]) -> float:
+        best_score = max(score for _, score in value_choices)
+        support = min(len(value_choices), 6) * 0.09
+        close_support = sum(
+            1 for candidate, _ in value_choices if timestamp_price_bonus(candidate, selected_timestamp_ms)[1] <= 500
+        )
+        return best_score + support + min(close_support, 4) * 0.10
+
+    best_value = max(grouped, key=lambda value: discount_score(grouped[value]))
+    return max(grouped[best_value], key=lambda item: item[1])[0]
 
 
 def build_template_rows(manifest_rows: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -1370,7 +1674,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parallel-engine-mode", choices=["shared", "thread_local"], default="shared")
     parser.add_argument("--fast-no-decoders", action="store_true")
     parser.add_argument("--gpu", action="store_true")
-    parser.add_argument("--paddle-cache", default="A:\\paddlex-cache")
+    parser.add_argument("--paddle-cache", default=os.environ.get("PADDLE_CACHE_DIR", str(Path("runtime") / "cache" / "paddle")))
     parser.add_argument("--aggregate-only-candidates", type=Path)
     parser.add_argument("--aggregate-only-raw", type=Path)
     parser.add_argument("--cascade-early-stop", action="store_true")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import mimetypes
 import os
 import re
@@ -27,44 +28,45 @@ from worker_queue import enqueue_task, get_task_by_source_job, init_queue_db, qu
 
 WEB_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = WEB_ROOT.parent
-A_PIPELINE_ROOT = Path("A:/lenta_pipeline/handoff_v19_speed_full_pipeline_20260518_040946")
-LOCAL_PIPELINE_ROOT = PROJECT_ROOT / "handoff_v19_speed_full_pipeline_20260518_040946"
-PIPELINE_ROOT = Path(os.environ.get("LENTA_PIPELINE_ROOT", str(A_PIPELINE_ROOT if A_PIPELINE_ROOT.exists() else LOCAL_PIPELINE_ROOT)))
-PIPELINE_SCRIPT = Path(os.environ.get("LENTA_PIPELINE_SCRIPT", str(PIPELINE_ROOT / "run_inference_no_ensemble.ps1")))
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_env_file(Path(os.environ.get("ENV_FILE", PROJECT_ROOT / ".env")))
+
+ARTIFACTS_ROOT = Path(os.environ.get("ARTIFACTS_DIR", os.environ.get("LENTA_ARTIFACTS_ROOT", PROJECT_ROOT / "artifacts")))
+PIPELINE_ROOT = Path(os.environ.get("LENTA_PIPELINE_ROOT", PROJECT_ROOT / "pipeline"))
+PIPELINE_SCRIPT = Path(os.environ.get("LENTA_PIPELINE_SCRIPT", PIPELINE_ROOT / "run_inference.ps1"))
 PIPELINE_POWERSHELL = os.environ.get("LENTA_POWERSHELL", "powershell.exe" if sys.platform == "win32" else "pwsh")
-DEFAULT_PIPELINE_PYTHON = Path("A:/rfdetr_envs/lenta-rfdetr-gpu/Scripts/python.exe")
-PIPELINE_PYTHON = os.environ.get(
-    "LENTA_PIPELINE_PYTHON",
-    str(DEFAULT_PIPELINE_PYTHON if sys.platform == "win32" and DEFAULT_PIPELINE_PYTHON.exists() else sys.executable),
-)
-DEFAULT_TESSERACT_EXE = Path("A:/tesseract_env/Library/bin/tesseract.exe")
-DEFAULT_TESSDATA_DIR = Path("A:/tesseract_env/Library/share/tessdata")
+PIPELINE_PYTHON = os.environ.get("LENTA_PIPELINE_PYTHON", os.environ.get("PIPELINE_PYTHON", sys.executable))
 TESSERACT_EXE = os.environ.get(
     "LENTA_TESSERACT_EXE",
-    str(
-        DEFAULT_TESSERACT_EXE
-        if sys.platform == "win32" and DEFAULT_TESSERACT_EXE.exists()
-        else shutil.which("tesseract") or "/usr/bin/tesseract"
-    ),
+    os.environ.get("TESSERACT_EXE", shutil.which("tesseract") or "tesseract"),
 )
-TESSDATA_DIR = Path(
-    os.environ.get(
-        "LENTA_TESSDATA_DIR",
-        str(
-            DEFAULT_TESSDATA_DIR
-            if sys.platform == "win32" and DEFAULT_TESSDATA_DIR.exists()
-            else "/usr/share/tesseract-ocr/5/tessdata"
-        ),
-    )
-)
+TESSDATA_DIR_RAW = os.environ.get("LENTA_TESSDATA_DIR", os.environ.get("TESSDATA_DIR", "")).strip()
+TESSDATA_DIR = Path(TESSDATA_DIR_RAW) if TESSDATA_DIR_RAW else None
 DEFAULT_CHECKPOINT = Path(
     os.environ.get(
         "LENTA_DETECTOR_CHECKPOINT",
-        str(PIPELINE_ROOT / "models" / "rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth"),
+        os.environ.get(
+            "DETECTOR_CHECKPOINT",
+            str(ARTIFACTS_ROOT / "models" / "rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth"),
+        ),
     )
 )
-FALLBACK_CHECKPOINT = PIPELINE_ROOT / "models" / "rfdetr_small_price_tag_except_26_12_20_tiled1280_e8_checkpoint_best_total.pth"
-RUNTIME_ROOT = Path(os.environ.get("LENTA_WEB_RUNTIME_ROOT", "A:/lenta_web_runtime" if Path("A:/").exists() else str(WEB_ROOT / "runtime")))
+RUNTIME_ROOT = Path(os.environ.get("RUNTIME_DIR", os.environ.get("LENTA_WEB_RUNTIME_ROOT", PROJECT_ROOT / "runtime")))
 JOBS_ROOT = Path(os.environ.get("LENTA_WEB_JOBS_ROOT", str(RUNTIME_ROOT / "jobs")))
 UNCERTAIN_ROOT = Path(os.environ.get("LENTA_UNCERTAIN_ROOT", str(RUNTIME_ROOT / "uncertain_predictions")))
 RETRAIN_CONFIG_PATH = Path(os.environ.get("LENTA_RETRAIN_CONFIG", str(RUNTIME_ROOT / "retrain_config.json")))
@@ -72,11 +74,13 @@ RESULTS_DB = Path(os.environ.get("LENTA_RESULTS_DB", str(RUNTIME_ROOT / "lenta_r
 WORKER_QUEUE_DB = Path(os.environ.get("LENTA_WORKER_QUEUE_DB", str(RUNTIME_ROOT / "worker_queue.sqlite")))
 JOB_EXECUTION_MODE = os.environ.get("LENTA_JOB_EXECUTION_MODE", "local").strip().lower()
 QUEUE_MODE_ENABLED = JOB_EXECUTION_MODE in {"queue", "worker", "workers", "distributed"}
-A_CATALOG = Path("A:/lenta_data/db_hack.csv")
-DEFAULT_CATALOG = Path(os.environ.get("LENTA_CATALOG_PATH", str(A_CATALOG if A_CATALOG.exists() else PROJECT_ROOT / "db_hack.csv")))
-SAMPLE_CSV = PROJECT_ROOT / "Данные" / "sample.csv"
+DEFAULT_CATALOG = Path(
+    os.environ.get("LENTA_CATALOG_PATH", os.environ.get("CATALOG_PATH", str(ARTIFACTS_ROOT / "data" / "db_hack.csv")))
+)
+SAMPLE_CSV = ARTIFACTS_ROOT / "data" / "sample.csv"
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 MAX_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
+MAX_ZIP_VIDEO_FILES = 64
 AUTO_RETRAIN_DEFAULT_ENABLED = False
 REVIEW_MAX_ITEMS = 160
 UNCERTAIN_MAX_ITEMS = 240
@@ -90,7 +94,7 @@ STEP_DEFS = [
     ("06_catalog_recovery_db_hack", "Восстановление по db_hack", 126.0),
     ("07_fill_aux_barcode", "Заполнение barcode и QR-полей", 42.0),
     ("08_deduplicate_rows", "Удаление дублей", 1.0),
-    ("09_export_final_submission", "Сборка CSV", 1.0),
+    ("09_export_final_submission_with_qr_priority", "Сборка CSV и QR-priority", 8.0),
 ]
 STEP_IDS = [step_id for step_id, _, _ in STEP_DEFS]
 STEP_LABELS = {step_id: label for step_id, label, _ in STEP_DEFS}
@@ -430,7 +434,7 @@ def sanitize_name(value: str, default: str = "video") -> str:
 def safe_upload_path(upload_dir: Path, filename: str) -> Path:
     stem = sanitize_name(filename)
     suffix = Path(filename).suffix.lower() or ".mp4"
-    if suffix != ".mp4":
+    if suffix not in {".mp4", ".zip"}:
         suffix = ".mp4"
     candidate = upload_dir / f"{stem}{suffix}"
     counter = 2
@@ -571,9 +575,7 @@ def choose_checkpoint() -> Path:
     explicit = os.environ.get("LENTA_DETECTOR_CHECKPOINT")
     if explicit:
         return Path(explicit)
-    if DEFAULT_CHECKPOINT.exists():
-        return DEFAULT_CHECKPOINT
-    return FALLBACK_CHECKPOINT
+    return DEFAULT_CHECKPOINT
 
 
 def parse_seconds(value: object) -> float:
@@ -634,6 +636,503 @@ def relative_to_root(path: Path, root: Path) -> str:
 
 def artifact_url(job_id: str, rel_path: str) -> str:
     return f"/api/jobs/{job_id}/artifact?path={quote(rel_path, safe='')}" if rel_path else ""
+
+
+def iso_timestamp(timestamp: float | None = None) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(timestamp or time.time()))
+
+
+def timestamp_day(timestamp: float | None) -> str:
+    if not timestamp:
+        return ""
+    return time.strftime("%Y-%m-%d", time.localtime(timestamp))
+
+
+def rounded_gb(bytes_value: float) -> float:
+    return round(bytes_value / (1024 ** 3), 2)
+
+
+def load_json_file(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def parse_number(value: object) -> float | None:
+    text = str(value or "").strip().replace(",", ".")
+    if not text:
+        return None
+    text = re.sub(r"[^0-9.\-]", "", text)
+    if text in {"", ".", "-", "-."}:
+        return None
+    try:
+        parsed = float(text)
+    except ValueError:
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def is_filled_value(value: object) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and text.lower() not in {"нет", "no", "none", "null", "nan"}
+
+
+def all_job_states() -> list[dict[str, object]]:
+    states: dict[str, dict[str, object]] = {}
+    with JOBS_LOCK:
+        for job_id, job in JOBS.items():
+            state = dict(job)
+            state.setdefault("job_id", job_id)
+            states[job_id] = state
+
+    if JOBS_ROOT.exists():
+        for state_path in JOBS_ROOT.glob(f"*/{JOB_STATE_FILENAME}"):
+            job_id = state_path.parent.name
+            payload = load_json_file(state_path)
+            if payload:
+                payload.setdefault("job_id", job_id)
+                states[job_id] = payload
+
+    def sort_key(item: dict[str, object]) -> float:
+        return float(item.get("finished_at", 0) or item.get("updated_at", 0) or item.get("started_at", 0) or 0)
+
+    return sorted(states.values(), key=sort_key, reverse=True)
+
+
+def job_manifest(job: dict[str, object]) -> dict[str, object]:
+    job_root = Path(str(job.get("job_root", "")))
+    return load_json_file(job_root / "manifest.json")
+
+
+def job_filename(job: dict[str, object], manifest: dict[str, object] | None = None) -> str:
+    current_video = str(job.get("current_video", "")).strip()
+    if current_video:
+        return current_video
+    manifest = manifest if manifest is not None else job_manifest(job)
+    videos = manifest.get("videos", [])
+    if isinstance(videos, list) and videos and isinstance(videos[0], dict):
+        return str(videos[0].get("filename", ""))
+    upload_files = job.get("upload_files", [])
+    if isinstance(upload_files, list) and upload_files and isinstance(upload_files[0], dict):
+        return str(upload_files[0].get("name", ""))
+    return ""
+
+
+def job_processing_seconds(job: dict[str, object], manifest: dict[str, object] | None = None) -> float:
+    manifest = manifest if manifest is not None else job_manifest(job)
+    seconds = parse_number(manifest.get("seconds", "")) if manifest else None
+    if seconds is not None and seconds > 0:
+        return seconds
+    started = parse_number(job.get("started_at", ""))
+    finished = parse_number(job.get("finished_at", "")) or parse_number(job.get("updated_at", ""))
+    if started is not None and finished is not None and finished >= started:
+        return finished - started
+    return 0.0
+
+
+def job_elapsed_seconds(job: dict[str, object]) -> float:
+    started = parse_number(job.get("started_at", ""))
+    if started is None or started <= 0:
+        return 0.0
+    return max(0.0, time.time() - started)
+
+
+def job_video_duration(job: dict[str, object]) -> float:
+    durations = job.get("video_durations", [])
+    if isinstance(durations, list) and durations:
+        value = parse_number(durations[0])
+        return round(value or 0.0, 3)
+    return 0.0
+
+
+def job_run_root(job: dict[str, object], manifest: dict[str, object] | None = None) -> Path:
+    current = Path(str(job.get("current_run_root", "")))
+    if str(current) and current.exists():
+        return current
+    manifest = manifest if manifest is not None else job_manifest(job)
+    videos = manifest.get("videos", []) if manifest else []
+    if isinstance(videos, list) and videos and isinstance(videos[0], dict):
+        run_root = Path(str(videos[0].get("run_root", "")))
+        if str(run_root):
+            return run_root
+    return Path(str(job.get("outputs_dir", "")))
+
+
+def job_csv_path(job: dict[str, object], manifest: dict[str, object] | None = None, run_root: Path | None = None) -> Path:
+    direct = Path(str(job.get("csv_path", "")))
+    if str(direct) and direct.exists():
+        return direct
+    manifest = manifest if manifest is not None else job_manifest(job)
+    videos = manifest.get("videos", []) if manifest else []
+    if isinstance(videos, list) and videos and isinstance(videos[0], dict):
+        final_csv = Path(str(videos[0].get("final_csv", "")))
+        if str(final_csv) and final_csv.exists():
+            return final_csv
+    if run_root:
+        candidate = run_root / "final_submission.csv"
+        if candidate.exists():
+            return candidate
+    return Path()
+
+
+def job_json_path(job: dict[str, object]) -> Path:
+    raw_path = str(job.get("json_path", "") or "").strip()
+    if raw_path:
+        direct = Path(raw_path)
+    else:
+        direct = Path()
+    if raw_path and direct.is_file():
+        return direct
+    job_root = Path(str(job.get("job_root", "")))
+    candidate = job_root / "combined_submission.json"
+    return candidate if candidate.is_file() else Path()
+
+
+def write_submission_json(csv_path: Path, json_path: Path, job_id: str) -> None:
+    rows = read_csv_rows(csv_path)
+    payload = {
+        "job_id": job_id,
+        "rows": rows,
+        "count": len(rows),
+        "source_csv": str(csv_path),
+        "generated_at": iso_timestamp(),
+    }
+    write_json(json_path, payload)
+
+
+def job_log_url(job_id: str, job: dict[str, object]) -> str:
+    job_root = Path(str(job.get("job_root", "")))
+    log_path = Path(str(job.get("current_log_path", "")))
+    if not log_path.exists():
+        manifest = job_manifest(job)
+        videos = manifest.get("videos", []) if manifest else []
+        if isinstance(videos, list) and videos and isinstance(videos[0], dict):
+            log_path = Path(str(videos[0].get("log_path", "")))
+    if not log_path.exists():
+        filename = job_filename(job)
+        stem = Path(filename).stem if filename else ""
+        log_path = job_root / "outputs" / f"{stem}.log" if stem else Path()
+    return artifact_url(job_id, relative_to_root(log_path, job_root)) if log_path.exists() else ""
+
+
+def has_saved_crops(job_root: Path, run_root: Path) -> bool:
+    candidates = [
+        job_root / "review" / "crops",
+        run_root / "base" / "ocr_zones_core_fixed" / "full_tags",
+        run_root / "base" / "tracking" / "tracks",
+    ]
+    for directory in candidates:
+        try:
+            if directory.exists() and any(item.is_file() for item in directory.rglob("*")):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def expand_uploaded_videos(upload_files: list[dict[str, object]], job_root: Path) -> list[Path]:
+    uploads: list[Path] = []
+    extract_root = job_root / "uploads" / "extracted"
+    for item in upload_files:
+        path = Path(str(item.get("path", "")))
+        suffix = path.suffix.lower()
+        if suffix == ".mp4":
+            uploads.append(path)
+            continue
+        if suffix != ".zip":
+            raise ValueError(f"Unsupported upload type: {path.name}")
+        if not zipfile.is_zipfile(path):
+            raise ValueError(f"Invalid ZIP archive: {path.name}")
+        archive_dir = extract_root / sanitize_name(path.stem, "archive")
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        extracted_count = 0
+        with zipfile.ZipFile(path) as archive:
+            members = [
+                member
+                for member in archive.infolist()
+                if not member.is_dir() and Path(member.filename).suffix.lower() == ".mp4"
+            ]
+            if not members:
+                raise ValueError(f"ZIP archive contains no MP4 files: {path.name}")
+            if len(members) > MAX_ZIP_VIDEO_FILES:
+                raise ValueError(f"ZIP archive contains too many MP4 files: {len(members)}")
+            for member in members:
+                if member.file_size <= 0:
+                    raise ValueError(f"Empty MP4 in ZIP: {member.filename}")
+                if member.file_size > MAX_UPLOAD_BYTES:
+                    raise ValueError(f"MP4 in ZIP is too large: {member.filename}")
+                target = safe_upload_path(archive_dir, Path(member.filename).name)
+                with archive.open(member) as source, target.open("wb") as destination:
+                    shutil.copyfileobj(source, destination)
+                uploads.append(target)
+                extracted_count += 1
+        if extracted_count:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    return uploads
+
+
+def normalize_timings(run_root: Path) -> list[dict[str, object]]:
+    rows = []
+    for row in read_timings(run_root):
+        step = str(row.get("step", "")).strip()
+        if not step:
+            continue
+        rows.append(
+            {
+                "step": step,
+                "seconds": round(parse_seconds(row.get("seconds")), 3),
+                "status": str(row.get("status", "")),
+            }
+        )
+    return rows
+
+
+def result_quality(rows: list[dict[str, str]]) -> dict[str, object]:
+    fields = ["product_name", "price_card", "price_default", "barcode", "discount_amount"]
+    total = len(rows)
+    fill_rate = {
+        field: round(
+            sum(1 for row in rows if is_filled_value(row.get(field, ""))) / total,
+            3,
+        )
+        if total
+        else 0.0
+        for field in fields
+    }
+
+    suspicious: set[int] = set()
+    empty_product_name = 0
+    empty_price_card = 0
+    empty_barcode = 0
+    discount_ge_80 = 0
+    price_outliers = 0
+
+    for index, row in enumerate(rows):
+        price_card = parse_number(row.get("price_card", ""))
+        price_default = parse_number(row.get("price_default", ""))
+        discount = parse_number(row.get("discount_amount", ""))
+
+        if not is_filled_value(row.get("product_name", "")):
+            empty_product_name += 1
+            suspicious.add(index)
+        if not is_filled_value(row.get("price_card", "")):
+            empty_price_card += 1
+        if not is_filled_value(row.get("barcode", "")):
+            empty_barcode += 1
+
+        if price_card is not None and price_default is not None and price_card > price_default:
+            suspicious.add(index)
+        if any(price is not None and price > 10000 for price in (price_card, price_default)):
+            price_outliers += 1
+            suspicious.add(index)
+        if discount is not None and abs(discount) >= 80:
+            discount_ge_80 += 1
+            suspicious.add(index)
+        if discount is not None and price_card is not None and price_default is None:
+            suspicious.add(index)
+
+    return {
+        "fill_rate": fill_rate,
+        "quality": {
+            "suspicious_rows": len(suspicious),
+            "empty_product_name": empty_product_name,
+            "empty_price_card": empty_price_card,
+            "empty_barcode": empty_barcode,
+            "discount_ge_80": discount_ge_80,
+            "price_outliers": price_outliers,
+        },
+    }
+
+
+def gpu_metrics() -> dict[str, object]:
+    command = [
+        "nvidia-smi",
+        "--query-gpu=name,utilization.gpu,memory.used,memory.total",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=3, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return {"available": False, "name": "", "util_percent": 0, "vram_used_gb": 0.0, "vram_total_gb": 0.0}
+    if result.returncode != 0 or not result.stdout.strip():
+        return {"available": False, "name": "", "util_percent": 0, "vram_used_gb": 0.0, "vram_total_gb": 0.0}
+    parts = [part.strip() for part in result.stdout.strip().splitlines()[0].split(",")]
+    if len(parts) < 4:
+        return {"available": False, "name": "", "util_percent": 0, "vram_used_gb": 0.0, "vram_total_gb": 0.0}
+    used_mb = parse_number(parts[2]) or 0.0
+    total_mb = parse_number(parts[3]) or 0.0
+    return {
+        "available": True,
+        "name": parts[0],
+        "util_percent": int(parse_number(parts[1]) or 0),
+        "vram_used_gb": round(used_mb / 1024, 2),
+        "vram_total_gb": round(total_mb / 1024, 2),
+    }
+
+
+def system_metrics_payload() -> dict[str, object]:
+    try:
+        import psutil  # type: ignore
+    except ImportError:
+        psutil = None  # type: ignore
+
+    if psutil is not None:
+        cpu_percent = float(psutil.cpu_percent(interval=0.1))
+        ram_stats = psutil.virtual_memory()
+        ram_payload = {
+            "used_gb": rounded_gb(float(ram_stats.used)),
+            "total_gb": rounded_gb(float(ram_stats.total)),
+            "percent": round(float(ram_stats.percent), 1),
+        }
+    else:
+        cpu_percent = 0.0
+        ram_payload = {"used_gb": 0.0, "total_gb": 0.0, "percent": 0.0}
+
+    disk_target = RUNTIME_ROOT
+    while not disk_target.exists() and disk_target != disk_target.parent:
+        disk_target = disk_target.parent
+    disk_stats = shutil.disk_usage(disk_target)
+    states = all_job_states()
+    active_jobs = sum(1 for job in states if str(job.get("status", "")) in {"queued", "running", "uploading"})
+    workers_available = max(0, 1 - active_jobs) if JOB_EXECUTION_MODE == "local" else 1
+    ocr_jobs = int(parse_number(os.environ.get("LENTA_OCR_JOBS", os.environ.get("LENTA_NUMERIC_JOBS", "8"))) or 8)
+    return {
+        "timestamp": iso_timestamp(),
+        "cpu_percent": round(cpu_percent, 1),
+        "ram": ram_payload,
+        "disk": {
+            "runtime_path": str(RUNTIME_ROOT),
+            "free_gb": rounded_gb(float(disk_stats.free)),
+            "total_gb": rounded_gb(float(disk_stats.total)),
+            "percent": round((1.0 - disk_stats.free / max(1, disk_stats.total)) * 100, 1),
+        },
+        "gpu": gpu_metrics(),
+        "workers": {
+            "mode": "queue" if QUEUE_MODE_ENABLED else "local",
+            "active": active_jobs,
+            "available": workers_available,
+            "ocr_jobs": ocr_jobs,
+        },
+    }
+
+
+def jobs_summary_payload() -> dict[str, object]:
+    states = all_job_states()
+    today = timestamp_day(time.time())
+    counts = {"queued": 0, "running": 0, "done": 0, "failed": 0}
+    today_done = 0
+    today_failed = 0
+    processing_seconds: list[float] = []
+    last_jobs: list[dict[str, object]] = []
+
+    for job in states:
+        status = str(job.get("status", "queued"))
+        count_status = "queued" if status == "uploading" else status
+        if count_status in counts:
+            counts[count_status] += 1
+        manifest = job_manifest(job)
+        is_active = status in {"queued", "running", "uploading"}
+        finished_at = None if is_active else (parse_number(job.get("finished_at", "")) or parse_number(job.get("updated_at", "")))
+        if status == "done" and timestamp_day(finished_at) == today:
+            today_done += 1
+        if status == "failed" and timestamp_day(finished_at) == today:
+            today_failed += 1
+        seconds = job_elapsed_seconds(job) if is_active else job_processing_seconds(job, manifest)
+        if status == "done" and seconds > 0:
+            processing_seconds.append(seconds)
+        if len(last_jobs) < 12:
+            last_jobs.append(
+                {
+                    "job_id": str(job.get("job_id", "")),
+                    "filename": job_filename(job, manifest),
+                    "status": status,
+                    "rows": int(parse_number(job.get("rows", manifest.get("rows", 0))) or 0),
+                    "duration_sec": job_video_duration(job),
+                    "processing_sec": round(seconds, 1),
+                    "created_at": iso_timestamp(parse_number(job.get("started_at", "")) or None),
+                    "finished_at": iso_timestamp(finished_at) if finished_at else "",
+                    "log_url": job_log_url(str(job.get("job_id", "")), job),
+                }
+            )
+
+    return {
+        "queued": counts["queued"],
+        "running": counts["running"],
+        "done": counts["done"],
+        "failed": counts["failed"],
+        "today_done": today_done,
+        "today_failed": today_failed,
+        "avg_processing_sec": round(sum(processing_seconds) / len(processing_seconds), 1) if processing_seconds else 0.0,
+        "last_jobs": last_jobs,
+    }
+
+
+def job_metrics_payload(job_id: str) -> dict[str, object] | None:
+    job = get_job_state(job_id)
+    if job is None:
+        return None
+    status_payload = build_job_status(job_id) or {}
+    manifest = job_manifest(job)
+    run_root = job_run_root(job, manifest)
+    csv_path = job_csv_path(job, manifest, run_root)
+    json_path = job_json_path(job)
+    rows = read_csv_rows(csv_path) if csv_path.exists() else []
+    quality_payload = result_quality(rows)
+    job_root = Path(str(job.get("job_root", "")))
+    debug_path = run_root / "qr_priority" / "qr_priority_debug.html"
+    debug_url = artifact_url(job_id, relative_to_root(debug_path, job_root)) if debug_path.exists() else ""
+    review_html = Path(str(job.get("review_html_path", "")))
+    if not review_html.exists():
+        review_html = job_root / "review" / "review_report.html"
+
+    status = str(status_payload.get("status", job.get("status", "queued")))
+    eta_seconds: int | None = None
+    eta_confidence = "low"
+    if status == "done":
+        eta_seconds = 0
+        eta_confidence = "high"
+    elif status == "running" and status_payload.get("eta_seconds") is not None:
+        eta_seconds = int(status_payload.get("eta_seconds", 0) or 0)
+        eta_confidence = "low"
+    processing_seconds = job_processing_seconds(job, manifest)
+    if status in {"queued", "running", "uploading"}:
+        elapsed = parse_number(status_payload.get("elapsed_seconds", ""))
+        processing_seconds = elapsed if elapsed is not None and elapsed > 0 else job_elapsed_seconds(job)
+
+    return {
+        "job_id": job_id,
+        "status": status,
+        "filename": job_filename(job, manifest),
+        "video_duration_sec": job_video_duration(job),
+        "processing_sec": round(processing_seconds, 1),
+        "rows": len(rows) or int(parse_number(job.get("rows", manifest.get("rows", 0))) or 0),
+        "current_stage": str(status_payload.get("stage", job.get("stage", status))),
+        "progress": float(status_payload.get("progress", 0) or 0),
+        "eta_sec": eta_seconds,
+        "eta_confidence": eta_confidence,
+        "timings": normalize_timings(run_root),
+        "fill_rate": quality_payload["fill_rate"],
+        "quality": quality_payload["quality"],
+        "artifacts": {
+            "csv_url": f"/api/jobs/{job_id}/csv" if csv_path.exists() and status == "done" else "",
+            "csv_ready": csv_path.exists() and status == "done",
+            "json_url": f"/api/jobs/{job_id}/json" if status == "done" and csv_path.exists() else "",
+            "json_ready": (json_path.is_file() or csv_path.is_file()) and status == "done",
+            "review_url": f"/api/jobs/{job_id}/review.html" if review_html.exists() else "",
+            "review_ready": review_html.exists(),
+            "debug_url": debug_url,
+            "debug_ready": debug_path.exists(),
+            "crops_saved": has_saved_crops(job_root, run_root),
+            "log_url": job_log_url(job_id, job),
+        },
+    }
 
 
 def ensure_retrain_config() -> dict[str, object]:
@@ -828,7 +1327,7 @@ def read_json_request(handler: SimpleHTTPRequestHandler) -> dict[str, object]:
 
 def make_upload_job(files: list[dict[str, object]]) -> dict[str, object]:
     if not files:
-        raise ValueError("No MP4 files were selected")
+        raise ValueError("No MP4 or ZIP files were selected")
     started = time.time()
     job_id = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
     job_root = JOBS_ROOT / job_id
@@ -840,6 +1339,9 @@ def make_upload_job(files: list[dict[str, object]]) -> dict[str, object]:
     total_bytes = 0
     for index, item in enumerate(files, start=1):
         original_name = Path(str(item.get("name", f"video_{index}.mp4"))).name
+        suffix = Path(original_name).suffix.lower()
+        if suffix not in {".mp4", ".zip"}:
+            raise ValueError(f"Unsupported file type: {original_name}")
         size = int(item.get("size", 0) or 0)
         if size <= 0:
             raise ValueError(f"Empty file: {original_name}")
@@ -978,13 +1480,14 @@ def start_uploaded_job(job_id: str) -> dict[str, object]:
         if str(job.get("status", "")) not in {"uploading", "queued"}:
             raise ValueError("Job cannot be started")
         upload_files = [dict(item) for item in job.get("upload_files", []) if isinstance(item, dict)]
-    uploads: list[Path] = []
+    upload_files_for_expansion: list[dict[str, object]] = []
     for item in upload_files:
         path = Path(str(item.get("path", "")))
         expected_size = int(item.get("size", 0) or 0)
         if not path.exists() or path.stat().st_size < expected_size:
             raise ValueError(f"Upload is incomplete: {item.get('name', '')}")
-        uploads.append(path)
+        upload_files_for_expansion.append({**item, "path": str(path)})
+    uploads = expand_uploaded_videos(upload_files_for_expansion, Path(str(job.get("job_root", JOBS_ROOT / job_id))))
     if not uploads:
         raise ValueError("No uploaded videos to process")
     started = time.time()
@@ -1124,6 +1627,7 @@ def build_job_status(job_id: str) -> dict[str, object] | None:
         "total_videos": total_videos,
         "rows": int(job.get("rows", 0)),
         "csv_url": f"/api/jobs/{job_id}/csv" if status == "done" else "",
+        "json_url": f"/api/jobs/{job_id}/json" if status == "done" else "",
         "review_url": f"/api/jobs/{job_id}/review" if status == "done" else "",
         "review_html_url": f"/api/jobs/{job_id}/review.html" if status == "done" else "",
         "review_zip_url": f"/api/jobs/{job_id}/review.zip" if status == "done" else "",
@@ -1158,7 +1662,7 @@ def run_pipeline(video_path: Path, video_id: str, run_root: Path, log_path: Path
         raise FileNotFoundError(f"Catalog is missing: {DEFAULT_CATALOG}")
     pipeline_python = resolve_executable(PIPELINE_PYTHON)
     tesseract_exe = resolve_executable(TESSERACT_EXE)
-    if not TESSDATA_DIR.exists():
+    if TESSDATA_DIR is not None and not TESSDATA_DIR.exists():
         raise FileNotFoundError(f"Tessdata directory is missing: {TESSDATA_DIR}")
 
     command = [
@@ -1172,8 +1676,6 @@ def run_pipeline(video_path: Path, video_id: str, run_root: Path, log_path: Path
         pipeline_python,
         "-TesseractExe",
         tesseract_exe,
-        "-TessdataDir",
-        str(TESSDATA_DIR),
         "-VideoPath",
         str(video_path),
         "-VideoId",
@@ -1185,6 +1687,8 @@ def run_pipeline(video_path: Path, video_id: str, run_root: Path, log_path: Path
         "-CatalogPath",
         str(DEFAULT_CATALOG),
     ]
+    if TESSDATA_DIR is not None:
+        command[command.index("-VideoPath"):command.index("-VideoPath")] = ["-TessdataDir", str(TESSDATA_DIR)]
     env = os.environ.copy()
     env.setdefault("PYTHONIOENCODING", "utf-8")
     env.setdefault("PYTHONUTF8", "1")
@@ -1526,6 +2030,8 @@ def run_job(job_id: str, uploads: list[Path], job_root: Path, outputs_dir: Path,
             set_job_state(job_id, stage="Сборка общего CSV", detail="")
             combined_csv = job_root / "combined_submission.csv"
             row_count = combine_csvs(final_csvs, combined_csv)
+            combined_json = job_root / "combined_submission.json"
+            write_submission_json(combined_csv, combined_json, job_id)
             review = build_review_package(job_id, job_root, manifest, final_csvs)
             uncertain = collect_uncertain_predictions(job_id, job_root, manifest)
             persist_completed_job(job_id, manifest, final_csvs, combined_csv, row_count, review, uncertain, started)
@@ -1537,6 +2043,7 @@ def run_job(job_id: str, uploads: list[Path], job_root: Path, outputs_dir: Path,
                         "rows": row_count,
                         "seconds": round(time.time() - started, 3),
                         "full_videos_deleted": True,
+                        "json": str(combined_json),
                         "review_count": review.get("count", 0),
                         "review_html": review.get("html_path", ""),
                         "review_zip": review.get("zip_path", ""),
@@ -1556,6 +2063,7 @@ def run_job(job_id: str, uploads: list[Path], job_root: Path, outputs_dir: Path,
                 detail="",
                 rows=row_count,
                 csv_path=str(combined_csv),
+                json_path=str(combined_json),
                 review_count=int(review.get("count", 0)),
                 review_path=str(job_root / "review" / "review_manifest.json"),
                 review_html_path=str(review.get("html_path", "")),
@@ -1617,7 +2125,7 @@ class LentaHandler(SimpleHTTPRequestHandler):
                     "worker_queue_db": str(WORKER_QUEUE_DB),
                     "pipeline_python": resolve_executable(PIPELINE_PYTHON),
                     "tesseract": resolve_executable(TESSERACT_EXE),
-                    "tessdata": str(TESSDATA_DIR),
+                    "tessdata": str(TESSDATA_DIR or ""),
                     "checkpoint": str(checkpoint),
                     "catalog": str(DEFAULT_CATALOG),
                 }
@@ -1637,6 +2145,24 @@ class LentaHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/metrics":
             status, payload, content_type = json_bytes(business_metrics_payload())
+            self.send_payload(status, payload, content_type)
+            return
+        if path == "/api/system/metrics":
+            status, payload, content_type = json_bytes(system_metrics_payload())
+            self.send_payload(status, payload, content_type)
+            return
+        if path == "/api/jobs/summary":
+            status, payload, content_type = json_bytes(jobs_summary_payload())
+            self.send_payload(status, payload, content_type)
+            return
+        metrics_match = re.fullmatch(r"/api/jobs/([^/]+)/metrics", path)
+        if metrics_match:
+            job_id = metrics_match.group(1)
+            payload_obj = job_metrics_payload(job_id)
+            if payload_obj is None:
+                status, payload, content_type = json_bytes({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
+            else:
+                status, payload, content_type = json_bytes(payload_obj)
             self.send_payload(status, payload, content_type)
             return
         status_match = re.fullmatch(r"/api/jobs/([^/]+)/status", path)
@@ -1757,6 +2283,39 @@ class LentaHandler(SimpleHTTPRequestHandler):
                 },
             )
             return
+        json_match = re.fullmatch(r"/api/jobs/([^/]+)/json", path)
+        if json_match:
+            job_id = json_match.group(1)
+            job = get_job_state(job_id)
+            if job is None:
+                status, payload, content_type = json_bytes({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
+                self.send_payload(status, payload, content_type)
+                return
+            if job.get("status") != "done":
+                status, payload, content_type = json_bytes({"error": "JSON is not ready"}, HTTPStatus.ACCEPTED)
+                self.send_payload(status, payload, content_type)
+                return
+            csv_path = Path(str(job.get("csv_path", "")))
+            if not csv_path.exists():
+                status, payload, content_type = json_bytes({"error": "CSV source for JSON is missing"}, HTTPStatus.NOT_FOUND)
+                self.send_payload(status, payload, content_type)
+                return
+            json_path = job_json_path(job)
+            if not json_path.is_file():
+                json_path = Path(str(job.get("job_root", JOBS_ROOT / job_id))) / "combined_submission.json"
+                write_submission_json(csv_path, json_path, job_id)
+                set_job_state(job_id, json_path=str(json_path))
+            self.send_payload(
+                HTTPStatus.OK.value,
+                json_path.read_bytes(),
+                "application/json; charset=utf-8",
+                {
+                    "Content-Disposition": f'attachment; filename="lenta_submission_{job_id}.json"',
+                    "X-Lenta-Job-Id": job_id,
+                    "X-Lenta-Rows": str(job.get("rows", 0)),
+                },
+            )
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
@@ -1835,9 +2394,12 @@ class LentaHandler(SimpleHTTPRequestHandler):
             if content_length > MAX_UPLOAD_BYTES:
                 raise ValueError("Uploaded videos are too large for this local server limit")
             body = self.rfile.read(content_length)
-            uploads = save_uploaded_videos(self.headers, body, upload_dir)
+            raw_uploads = save_uploaded_videos(self.headers, body, upload_dir)
+            if not raw_uploads:
+                raise ValueError("No MP4 or ZIP files were uploaded")
+            uploads = expand_uploaded_videos([{"path": str(path)} for path in raw_uploads], job_root)
             if not uploads:
-                raise ValueError("No MP4 files were uploaded")
+                raise ValueError("No MP4 files were found")
             video_durations = [round(mp4_duration_seconds(path), 3) for path in uploads]
 
             set_job_state(
@@ -1887,6 +2449,7 @@ class LentaHandler(SimpleHTTPRequestHandler):
                     "queue_task_id": task_id,
                     "status_url": f"/api/jobs/{job_id}/status",
                     "csv_url": f"/api/jobs/{job_id}/csv",
+                    "json_url": f"/api/jobs/{job_id}/json",
                 },
                 HTTPStatus.ACCEPTED,
             )

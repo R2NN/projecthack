@@ -1,54 +1,37 @@
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .venv/
 venv/
 
-# Runtime
-runtime/
-jobs/
-logs/
+# Runtime outputs
+runtime/*
+!runtime/.gitkeep
 *.log
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
-public_url.txt
 
-# Local artifacts and data
-artifacts/*
-!artifacts/README.md
-!artifacts/.gitkeep
-pipeline/models/*
-!pipeline/models/.gitkeep
-pipeline/runs/
-pipeline/datasets/
-pipeline/repro_outputs/
-pipeline/data/db_hack.csv
-pipeline/data/**/*.mp4
-pipeline/data/**/*.avi
-pipeline/data/**/*.mov
-*.mp4
-*.avi
-*.mov
+# Local env
+.env
 
-# Large model/checkpoint files
-*.pth
-*.pt
-*.ckpt
-*.onnx
-*.engine
+# Optional large local data. Keep README/.gitkeep tracked.
+artifacts/training_data/
+artifacts/models/*.tmp
+artifacts/**/*.zip
+artifacts/**/*.7z
 
-# Archives and challenge handouts
+# Archives and generated reports
 *.zip
 *.7z
 *.rar
-*.pdf
-*.ppt
-*.pptx
+debug_reports/
+saved_crop_job/
+runs/
+jobs/
 
 # OS/editor
 .DS_Store

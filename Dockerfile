@@ -8,14 +8,16 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
     VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH" \
+    ARTIFACTS_DIR=/artifacts \
+    RUNTIME_DIR=/runtime \
     LENTA_WEB_RUNTIME_ROOT=/runtime \
     LENTA_PIPELINE_ROOT=/app/pipeline \
-    LENTA_PIPELINE_SCRIPT=/app/pipeline/run_inference_no_ensemble.ps1 \
+    LENTA_PIPELINE_SCRIPT=/app/pipeline/run_inference.ps1 \
     LENTA_POWERSHELL=pwsh \
     LENTA_PIPELINE_PYTHON=/opt/venv/bin/python \
     LENTA_TESSERACT_EXE=/usr/bin/tesseract \
     LENTA_TESSDATA_DIR=/usr/share/tesseract-ocr/5/tessdata \
-    LENTA_CATALOG_PATH=/artifacts/db_hack.csv \
+    LENTA_CATALOG_PATH=/artifacts/data/db_hack.csv \
     LENTA_DETECTOR_CHECKPOINT=/artifacts/models/rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth \
     LENTA_RESULTS_DB=/runtime/lenta_results.sqlite \
     LENTA_WORKER_QUEUE_DB=/runtime/worker_queue.sqlite \
@@ -45,7 +47,7 @@ COPY web /app/web
 COPY pipeline /app/pipeline
 
 RUN if [ "$INSTALL_PIPELINE_DEPS" = "true" ]; then \
-      /opt/venv/bin/python -m pip install --no-cache-dir -r /app/pipeline/requirements-gpu.txt; \
+      /opt/venv/bin/python -m pip install --no-cache-dir -r /app/pipeline/requirements.txt; \
     fi
 
 VOLUME ["/runtime", "/artifacts"]

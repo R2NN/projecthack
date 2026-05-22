@@ -52,6 +52,7 @@
                 в превью и получите готовый CSV с найденными ценниками для контроля
                 полки.
               </p>
+              <a class="hero-dashboard-link" href="#monitoring">Мониторинг</a>
             </div>
 
             <section class="upload-card" id="upload-card" aria-labelledby="upload-title">
@@ -64,17 +65,17 @@
                 id="dropzone"
                 role="button"
                 tabindex="0"
-                aria-label="Перетащите MP4-файл или выберите видео"
+                aria-label="Перетащите MP4 или ZIP-файл либо выберите файлы"
               >
-                <input id="video-input" type="file" accept="video/mp4,.mp4" multiple />
+                <input id="video-input" type="file" accept="video/mp4,.mp4,.zip,application/zip" multiple />
                 <div class="dropzone-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" focusable="false">
                     <path d="M12 3v10m0-10 4 4m-4-4L8 7" />
                     <path d="M4 15v3a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-3" />
                   </svg>
                 </div>
-                <p class="dropzone-title">Перетащите MP4 сюда</p>
-                <p class="dropzone-subtitle">можно загрузить сразу несколько видео</p>
+                <p class="dropzone-title">Перетащите MP4 или ZIP сюда</p>
+                <p class="dropzone-subtitle">ZIP может содержать сразу несколько MP4</p>
                 <button class="secondary-button" id="pick-file" type="button">
                   Выбрать файлы
                 </button>
@@ -129,6 +130,9 @@
               <a class="download-button disabled" id="download-csv" download href="#" aria-disabled="true" hidden>
                 Скачать CSV
               </a>
+              <a class="download-button disabled" id="download-json" download href="#" aria-disabled="true" hidden>
+                Скачать JSON
+              </a>
               <a class="download-button disabled" id="download-review" target="_blank" rel="noreferrer" href="#" aria-disabled="true" hidden>
                 Открыть HTML-отчет
               </a>
@@ -136,6 +140,76 @@
                 Скачать ревью ZIP
               </a>
             </section>
+          </div>
+        </section>
+
+        <section class="monitoring-section" id="monitoring" aria-labelledby="monitoring-title">
+          <div class="monitoring-shell">
+            <div class="monitoring-header">
+              <div>
+                <p class="eyebrow">Эксплуатация</p>
+                <h2 id="monitoring-title">Мониторинг</h2>
+              </div>
+              <div class="dashboard-refresh" id="dashboard-refresh">Ждем метрики</div>
+            </div>
+
+            <div class="system-grid" aria-label="Системные метрики">
+              <article class="metric-card" id="metric-cpu"></article>
+              <article class="metric-card" id="metric-ram"></article>
+              <article class="metric-card" id="metric-gpu"></article>
+              <article class="metric-card" id="metric-disk"></article>
+              <article class="metric-card" id="metric-workers"></article>
+            </div>
+
+            <div class="monitoring-layout">
+              <section class="monitor-panel jobs-panel" aria-labelledby="jobs-title">
+                <div class="panel-heading">
+                  <h3 id="jobs-title">Очередь / задачи</h3>
+                  <span id="jobs-average">среднее --</span>
+                </div>
+                <div class="job-stat-grid">
+                  <div><strong id="jobs-queued">0</strong><span>в очереди</span></div>
+                  <div><strong id="jobs-running">0</strong><span>в работе</span></div>
+                  <div><strong id="jobs-done">0</strong><span>готово</span></div>
+                  <div><strong id="jobs-failed">0</strong><span>ошибки</span></div>
+                </div>
+                <div class="job-list" id="job-list">
+                  <div class="empty-state">Задач пока нет</div>
+                </div>
+              </section>
+
+              <section class="monitor-panel current-job-panel" aria-labelledby="current-job-title">
+                <div class="panel-heading">
+                  <h3 id="current-job-title">Текущая задача</h3>
+                  <span id="current-job-status">ожидание</span>
+                </div>
+                <div class="current-job-body" id="current-job-body">
+                  <div class="empty-state">Нет активных задач</div>
+                </div>
+              </section>
+            </div>
+
+            <div class="monitoring-layout">
+              <section class="monitor-panel timing-panel" aria-labelledby="timing-title">
+                <div class="panel-heading">
+                  <h3 id="timing-title">Время этапов</h3>
+                  <span id="timing-total">--</span>
+                </div>
+                <div class="timing-bars" id="timing-bars">
+                  <div class="empty-state">Timing появится после старта pipeline</div>
+                </div>
+              </section>
+
+              <section class="monitor-panel quality-panel" aria-labelledby="quality-title">
+                <div class="panel-heading">
+                  <h3 id="quality-title">Качество результата</h3>
+                  <span id="quality-rows">0 rows</span>
+                </div>
+                <div class="quality-body" id="quality-body">
+                  <div class="empty-state">Готовых результатов пока нет</div>
+                </div>
+              </section>
+            </div>
           </div>
         </section>
       </main>

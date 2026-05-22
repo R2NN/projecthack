@@ -14,6 +14,11 @@ from typing import Any
 
 
 NO_VALUE = "нет"
+
+# Discount labels store only the integer part of the real discount. When a
+# regular price is reconstructed from card price and printed discount, +0.5 pp
+# is the neutral midpoint compensation for the discarded fractional part.
+DISCOUNT_FLOOR_COMPENSATION_PERCENT = 0.5
 K_SYMBOL = "\u041a"
 SH_SYMBOL = "\u0428"
 DEFAULT_NET_FIELDS = [
@@ -32,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fill conservative non-OCR submission fields after v12 product recovery.")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--sample-csv", type=Path, default=Path("data/sample.csv"))
+    parser.add_argument("--sample-csv", type=Path, default=Path("../artifacts/data/sample.csv"))
     parser.add_argument("--input-csv", type=Path)
     parser.add_argument("--output-csv", type=Path)
     parser.add_argument("--fill-color", default="red")
@@ -42,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--price-consistency-postprocess", action="store_true")
     parser.add_argument("--price-sanity-postprocess", action="store_true")
     parser.add_argument("--extract-special-symbols", action="store_true")
+    parser.add_argument("--special-symbol-template-dir", type=Path)
     parser.add_argument("--barcode-from-catalog", action="store_true")
     parser.add_argument("--catalog-barcode-csv", type=Path)
     parser.add_argument("--overwrite-barcode-from-catalog", action="store_true")
@@ -166,7 +172,10 @@ def discount_factor(value: Any) -> float | None:
     percent = parse_discount_percent(value)
     if percent is None:
         return None
-    factor = 1.0 + percent / 100.0
+    displayed_percent = abs(float(percent))
+    if displayed_percent > 70.0:
+        return None
+    factor = 1.0 - (displayed_percent + DISCOUNT_FLOOR_COMPENSATION_PERCENT) / 100.0
     return factor if 0.10 <= factor <= 0.99 else None
 
 
@@ -525,7 +534,7 @@ def build_recovery_lookup(recovery_csv: Path) -> dict[str, dict[str, Any]]:
 
 
 class SpecialSymbolClassifier:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, template_dir: Path | None = None) -> None:
         import cv2
         import numpy as np
         from sklearn.pipeline import make_pipeline
@@ -535,7 +544,7 @@ class SpecialSymbolClassifier:
         self.cv2 = cv2
         self.np = np
         self.model = make_pipeline(StandardScaler(), SVC(kernel="rbf", C=3, gamma="scale"))
-        base = root / "repro_outputs" / "quality_43_15" / "ocr_zones_core_fixed" / "full_tags"
+        base = template_dir or root.parent / "artifacts" / "special_symbol_templates" / "full_tags"
         refs = {
             K_SYMBOL: ["0002", "0006", "0010", "0011"],
             SH_SYMBOL: ["0001", "0003", "0007", "0015", "0023", "0100", "0117", "0122", "0157"],
@@ -667,15 +676,21 @@ def repair_price_sanity(row: dict[str, Any], changes: list[dict[str, Any]], trac
         relation_error = abs(normalized_card - expected_card) / max(1.0, expected_card)
         ratio = max(normalized_default, normalized_card) / max(1.0, min(normalized_default, normalized_card))
 
-        if normalized_card > 20000.0 or normalized_card > normalized_default * 1.25:
-            repaired_card = inferred_card_price(normalized_default * factor)
-            if 5.0 <= repaired_card <= 20000.0:
-                set_price_value(row, "price_default", normalized_default, "price_default_shelf_cents", changes, track_id)
-                set_price_value(row, "price_card", repaired_card, "discount_relation_card_repair", changes, track_id)
-        elif ratio >= 4.0 or relation_error > 0.35 or normalized_default > 20000.0:
+        if 5.0 <= normalized_card <= 9999.0:
+            set_price_value(row, "price_card", normalized_card, "price_card_shelf_cents", changes, track_id)
+        else:
+            clear_price_family(row, "price_card", "price_card_out_of_range_removed", changes, track_id)
+            price_card = None
+
+        if price_card is not None and (
+            normalized_default <= normalized_card * 1.02
+            or normalized_card > normalized_default * 1.25
+            or ratio >= 4.0
+            or relation_error > 0.35
+            or normalized_default > 20000.0
+        ):
             repaired_default = inferred_regular_price(normalized_card / factor)
             if 5.0 <= repaired_default <= 20000.0:
-                set_price_value(row, "price_card", normalized_card, "price_card_shelf_cents", changes, track_id)
                 set_price_value(
                     row,
                     "price_default",
@@ -684,6 +699,10 @@ def repair_price_sanity(row: dict[str, Any], changes: list[dict[str, Any]], trac
                     changes,
                     track_id,
                 )
+            else:
+                clear_price_family(row, "price_default", "price_default_gross_outlier_removed", changes, track_id)
+        elif price_card is not None:
+            set_price_value(row, "price_default", normalized_default, "price_default_shelf_cents", changes, track_id)
 
     price_default = parse_price(row.get("price_default", ""))
     price_card = parse_price(row.get("price_card", ""))
@@ -713,7 +732,7 @@ def repair_price_sanity(row: dict[str, Any], changes: list[dict[str, Any]], trac
             clear_price_family(row, "price_default", "price_default_out_of_range_removed", changes, track_id)
     if price_card is not None:
         normalized_card = normalize_card_price(price_card, row.get("price_card", ""))
-        if 5.0 <= normalized_card <= 20000.0:
+        if 5.0 <= normalized_card <= 9999.0:
             set_price_value(row, "price_card", normalized_card, "price_card_99_cents", changes, track_id)
         else:
             clear_price_family(row, "price_card", "price_card_out_of_range_removed", changes, track_id)
@@ -920,7 +939,8 @@ def main() -> None:
         elif local_catalog.exists():
             catalog_barcode_path = local_catalog
     catalog_barcode_index = build_catalog_barcode_index(catalog_barcode_path) if args.barcode_from_catalog else None
-    special_classifier = SpecialSymbolClassifier(root) if args.extract_special_symbols else None
+    special_template_dir = as_abs(root, args.special_symbol_template_dir) if args.special_symbol_template_dir else None
+    special_classifier = SpecialSymbolClassifier(root, special_template_dir) if args.extract_special_symbols else None
 
     filled_rows, changes = fill_rows(
         rows,
