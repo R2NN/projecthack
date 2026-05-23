@@ -406,31 +406,31 @@ CPU-only режим технически возможен для части pipe
 
 ## Лицензии и чистота поставки
 
-Репозиторий очищен от лишних тяжёлых и потенциально закрытых файлов. В обычную Git-историю не включены:
+Ниже — инженерная проверка лицензий ключевых компонентов, а не финальное юридическое заключение. Цель была выбрать стек, который выглядит пригодным для корпоративного использования в Ленте: без AGPL/commercial-only детектора в основном inference path, с permissive-лицензиями у модели детекции, OCR и barcode/QR-decoder библиотек.
 
-- видео с полок;
-- обучающие датасеты;
-- отдельные веса моделей (`.pth`, `.pt`, `.ckpt`, `.onnx`) вне LFS-архива;
-- PDF/PPTX материалы хакатона;
-- runtime-логи, SQLite, crops, uncertain-хранилище;
-- брендовые ассеты заказчика.
+Ключевые компоненты runtime/inference:
 
-В репозитории лежат:
+| Компонент | Роль в решении | Лицензия / статус |
+|---|---|---|
+| [RF-DETR / `rfdetr`](https://github.com/roboflow/rf-detr) | детекция ценников, обучение нового checkpoint | Apache-2.0 для open-source пакета и Apache-designated весов; используются RF-DETR Small/обычная open-source ветка, не RF-DETR Plus/X/2XL |
+| Собственный checkpoint `rfdetr_small_price_tag...pth` | дообученные веса детектора ценников | производный артефакт обучения на размеченных данных проекта; для промышленного использования нужно подтвердить права на training data и факт, что базовые веса RF-DETR использовались в Apache-совместимом варианте |
+| [PyTorch / TorchVision](https://github.com/pytorch/pytorch) | inference/training backend для RF-DETR | BSD-style / BSD-3-Clause |
+| [OpenCV](https://opencv.org/license/) и `opencv-python-headless` | crops, preprocessing, QR geometry, image processing | OpenCV 4.5+ — Apache-2.0; Python packaging scripts — MIT |
+| [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) + `tesseract-ocr-eng/rus` | OCR product-name и длинных строк | Apache-2.0; tessdata/tessdata_fast модели также публикуются как Apache-2.0 |
+| [EasyOCR](https://pypi.org/project/easyocr/) | OCR сложных ценовых зон | Apache-2.0 |
+| [RapidOCR / `rapidocr-onnxruntime`](https://pypi.org/project/rapidocr-onnxruntime/) | быстрый OCR числовых и коротких зон | Apache-2.0 |
+| [zxing-cpp](https://github.com/zxing-cpp/zxing-cpp) | barcode/QR decode | Apache-2.0 |
+| [ONNX Runtime](https://github.com/microsoft/onnxruntime) | backend для OCR-моделей | MIT |
+| [Hugging Face Transformers](https://github.com/huggingface/transformers) | модельные зависимости RF-DETR/OCR stack | Apache-2.0 |
+| [Roboflow Supervision](https://supervision.roboflow.com/latest/about/) | CV utility layer | MIT |
+| NumPy, SciPy, pandas, scikit-learn, psutil, PyYAML, Pillow | numeric/data/runtime utilities | в основном permissive-лицензии BSD/MIT/HPND-like |
+| PaddleOCR/PaddlePaddle | optional/development OCR path в полном requirements | Apache-2.0; не является обязательным для lean appliance inference |
 
-- исходный код web/API;
-- исходники pipeline;
-- `sample.csv` только как header-схема итоговой выгрузки;
-- Docker/compose/инструкции;
-- скрипты проверки окружения.
-- Git LFS артефакты: checkpoint, каталог, sample schema и пример видео.
+Docker-окружение дополнительно использует Ubuntu packages, PowerShell base image, PyTorch CUDA base image, NVIDIA CUDA runtime/toolkit и `ffmpeg`. Они не меняют ML-логику, но для промышленной поставки контейнера нужно отдельно сохранить/проверить notices и условия этих системных компонентов. Особенно стоит перепроверить `ffmpeg`, потому что его итоговая лицензия зависит от сборки и включённых codecs, а GPU-образ зависит от условий NVIDIA CUDA/PyTorch container stack.
 
-Почему это важно:
+Чистота поставки по данным и артефактам остаётся отдельным требованием: рабочие видео, закрытые обучающие датасеты, runtime-логи, SQLite, crops, debug/review jobs, презентационные файлы и временные архивы не должны попадать в обычную Git-историю. В репозитории остаются код, Docker/Compose, проверки окружения, `sample.csv` как схема, а крупные воспроизводимые артефакты идут через Git LFS.
 
-- рабочие видео, логи и промежуточные crops не попадают в публичную историю Git;
-- веса модели упакованы отдельно и могут быть заменены новым checkpoint без изменения кода;
-- third-party библиотеки не vendored в проект, а устанавливаются через package managers;
-- зависимости можно проверить по `pipeline/requirements-appliance.txt`, `pipeline/requirements-appliance-gpu.txt` и `pipeline/requirements-training-gpu.txt`;
-- поставка воспроизводима: код, Docker-инструкция и нужные артефакты находятся по одной ссылке.
+Перед передачей в production всё равно нужно сделать финальную юридическую проверку: зафиксировать полный список прямых и транзитивных зависимостей, приложить license notices к Docker image/дистрибутиву, подтвердить права на обучающие данные и каталог `db_hack.csv`, а также проверить актуальные условия базовых образов, CUDA/NVIDIA и системных пакетов на дату внедрения.
 
 
 ## Структура
