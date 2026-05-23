@@ -148,30 +148,11 @@ flowchart TD
 
 Такой подход устойчивее, чем “один OCR на всё”: цена, barcode и название товара требуют разных preprocessing, разных confidence-порогов и разной логики восстановления.
 
-## Быстрый запуск UI
+## Проверка артефактов и окружения
 
-```bash
-git lfs install
-git clone --branch feat/training-mode-appliance-20260523 https://github.com/R2NN/projecthack.git
-cd projecthack
-git lfs pull
-docker compose --profile gpu up --build shelf-vision-gpu
-```
+Основной one-command запуск находится в начале README. Этот раздел нужен только для диагностики, если сервис поднялся, но инференс не стартует или `/api/ready` сообщает о проблеме.
 
-Открыть:
-
-```text
-http://127.0.0.1:8001/
-```
-
-Если NVIDIA GPU недоступна, используйте CPU fallback: `docker compose up --build` и откройте `http://127.0.0.1:8000/`.
-
-Если артефакты не скачались через Git LFS, web-интерфейс поднимется, а `/api/ready` и `tools/doctor.py` покажут, каких файлов не хватает для полного инференса.
-
-## Полный запуск инференса в Docker
-
-1. Выполните `git lfs pull`.
-2. Проверьте, что появилась структура:
+После `git lfs pull` должны быть доступны:
 
 ```text
 artifacts/
@@ -184,39 +165,13 @@ artifacts/
     full_tags/
 ```
 
-Крупные файлы хранятся через Git LFS, поэтому при обычном `git clone` нужен установленный Git LFS.
-
-Проверка:
+Быстрая проверка:
 
 ```bash
 python tools/doctor.py
 ```
 
-GPU-запуск для NVIDIA:
-
-```bash
-docker compose --profile gpu up --build shelf-vision-gpu
-```
-
-По умолчанию GPU UI будет на `http://127.0.0.1:8001/`.
-
-CPU fallback:
-
-```bash
-docker compose up --build
-```
-
-CPU UI будет на `http://127.0.0.1:8000/`.
-
-Контейнер использует Python 3.12, изолированное окружение `/opt/venv` для Python-зависимостей pipeline и Linux-пути к системным бинарям:
-
-```text
-LENTA_PIPELINE_PYTHON=/opt/venv/bin/python
-LENTA_TESSERACT_EXE=/usr/bin/tesseract
-LENTA_TESSDATA_DIR=/usr/share/tesseract-ocr/5/tessdata
-```
-
-Для GPU в Docker нужен NVIDIA Container Toolkit и совместимые драйверы. В промышленном контуре web/API и GPU workers стоит запускать отдельными сервисами: web остаётся лёгким входным контуром, а обработчики масштабируются независимо.
+`doctor.py` проверяет checkpoint, `db_hack.csv`, runtime-директорию, Tesseract, Python/OCR stack и доступность GPU. Внутри Docker Python, Tesseract и tessdata уже настроены, вручную прописывать их пути не нужно.
 
 ## Артефакты модели и каталога
 
