@@ -1,22 +1,27 @@
-# Внешние артефакты
+# Artifacts
 
-Эта папка намеренно не версионируется целиком. Сюда кладутся данные и веса, которые нельзя хранить в публичном GitHub-репозитории:
+This directory contains files that are required at runtime but are too large or too data-specific to keep inside source modules.
 
-- `db_hack.csv` — точный каталог товаров;
-- `models/rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth` — обученный чекпойнт детектора;
-- дополнительные локальные модели OCR, если они используются в конкретном стенде.
-
-Минимальная структура для полного инференса:
+Expected layout:
 
 ```text
 artifacts/
-  db_hack.csv
   models/
     rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth
+  data/
+    db_hack.csv
+    sample.csv
+  special_symbol_templates/
+    full_tags/
+      track_*.jpg
+  training_data/
+    # optional annotated training videos and annotations
 ```
 
-Проверить, что артефакты подключены:
+The current package includes the detector checkpoint, `db_hack.csv`, `sample.csv`, and the small set of full-tag template images used by the special-symbol classifier.
 
-```powershell
-python tools/check_artifacts.py
-```
+Training data is not bundled by default. Put annotated folders into `artifacts/training_data` or mount another folder through `HOST_TRAINING_DATA_DIR`.
+
+Only folders with matching `<folder>.mp4` and `<folder>.csv` files are used for detector training. Folders without annotations, such as `Unlabeled`, are ignored by the dataset builder.
+
+Training outputs are written to `runtime/training/...`; trained checkpoints are not written back into `artifacts/models` automatically.

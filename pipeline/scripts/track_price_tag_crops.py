@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,6 +30,24 @@ MODEL_CLASSES = {
     "base": RFDETRBase,
     "large": RFDETRLarge,
 }
+
+
+def resolve_device(requested: str) -> str:
+    requested = (requested or os.environ.get("LENTA_RESOLVED_DEVICE") or os.environ.get("LENTA_INFERENCE_DEVICE") or "auto").lower()
+    if requested not in {"auto", "cpu", "cuda"}:
+        raise ValueError(f"Unsupported device: {requested}. Use auto, cpu, or cuda.")
+    if requested == "cpu":
+        return "cpu"
+    try:
+        import torch
+    except ImportError:
+        if requested == "cuda":
+            raise RuntimeError("GPU_NOT_AVAILABLE: torch is not installed in this Python environment.")
+        return "cpu"
+    cuda_available = bool(torch.cuda.is_available())
+    if requested == "cuda" and not cuda_available:
+        raise RuntimeError("GPU_NOT_AVAILABLE: CUDA device was requested but torch.cuda.is_available() is false.")
+    return "cuda" if cuda_available else "cpu"
 
 
 @dataclass
@@ -1247,6 +1266,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", default="runs/rfdetr_small_price_tag_tiled1280_e8/checkpoint_best_total.pth")
     parser.add_argument("--output", default="")
     parser.add_argument("--variant", choices=sorted(MODEL_CLASSES), default="small")
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default=os.environ.get("LENTA_RESOLVED_DEVICE", os.environ.get("LENTA_INFERENCE_DEVICE", "auto")))
     parser.add_argument("--frame-step-ms", type=int, default=500)
     parser.add_argument("--start-ms", type=int, default=0)
     parser.add_argument("--end-ms", type=int, default=None)
@@ -1306,7 +1326,8 @@ def main() -> None:
     output_dir = Path(args.output or f"analysis_outputs/tracked_ocr_crops_{video_stem}_tiled1280").resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model = MODEL_CLASSES[args.variant](pretrain_weights=str(Path(args.checkpoint).resolve()), num_classes=1, device="cuda")
+    device = resolve_device(args.device)
+    model = MODEL_CLASSES[args.variant](pretrain_weights=str(Path(args.checkpoint).resolve()), num_classes=1, device=device)
 
     motion_probes: list[MotionProbe] = []
     stop_windows: list[tuple[int, int]] = []

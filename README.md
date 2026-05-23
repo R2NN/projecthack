@@ -6,13 +6,63 @@ Shelf Vision принимает MP4-видео прохода робота вд�
 
 Демо-стенд:
 
-https://adapters-flower-tray-makes.trycloudflare.com
+https://apt-valley-plugins-therefore.trycloudflare.com
 
 Ссылка работает через Cloudflare quick tunnel и может меняться при выключении компьютера, перезапуске или сбое туннеля. Если ссылка не открывается, настоятельно прошу написать в Telegram: [@rktqq](https://t.me/rktqq).
 
 Health check:
 
-https://adapters-flower-tray-makes.trycloudflare.com/api/health
+https://apt-valley-plugins-therefore.trycloudflare.com/api/health
+
+## Быстрый старт: 2 режима одной командой
+
+Развертывание было одним из сложных мест: раньше нужно было понимать внутренние скрипты, OCR-зависимости, веса, каталог и runtime-пути. Сейчас проект собран как Docker Compose appliance с двумя понятными режимами.
+
+Перед запуском нужны:
+
+- Docker Desktop или Docker Engine с Docker Compose;
+- Git LFS для скачивания модели, каталога и примера видео;
+- интернет для первой сборки Docker image и загрузки Python/OCR/RF-DETR артефактов;
+- для GPU inference и training: NVIDIA driver и NVIDIA Container Toolkit;
+- для training: размеченные данные в формате `<name>/<name>.mp4` + `<name>/<name>.csv`.
+
+Скачать проект:
+
+```bash
+git lfs install
+git clone --branch feat/training-mode-appliance-20260523 https://github.com/R2NN/projecthack.git
+cd projecthack
+git lfs pull
+```
+
+Режим 1 — inference с готовыми весами:
+
+```bash
+docker compose up --build
+```
+
+Открыть:
+
+```text
+http://127.0.0.1:8000/
+```
+
+Режим 2 — обучение с нуля и запуск сайта на новых весах:
+
+```bash
+docker compose --profile training up --build shelf-vision-training
+```
+
+Для training положите разметку в:
+
+```text
+artifacts/training_data/
+  25_12-20/
+    25_12-20.mp4
+    25_12-20.csv
+```
+
+После обучения сайт будет доступен на `http://127.0.0.1:8002/`, а новые веса сохранятся в `runtime/training/models/`. Основной checkpoint из `artifacts/models/` не перезаписывается.
 
 ## Коротко
 
@@ -21,14 +71,14 @@ https://adapters-flower-tray-makes.trycloudflare.com/api/health
 - Результаты сохраняются не только в браузере: CSV, SQLite, manifest, HTML/ZIP-отчёт по crops, uncertain-хранилище.
 - Загрузка больших MP4 идёт по частям: браузер отправляет файл блоками, а сервер запускает обработку после полной сборки файла.
 - Архитектура готова к горизонтальному масштабированию: видео, кадры и crops можно распределять между workers.
-- Для воспроизведения приложен `artifacts_for_judges.zip`: в нём уже лежат каталог и checkpoint в нужной структуре.
+- Для воспроизведения крупные артефакты лежат в Git LFS: checkpoint, `db_hack.csv`, `sample.csv` и пример видео.
 - Добавлен worker-ready режим: web/API может только ставить задачи в очередь, а независимые workers забирают их без изменения ML-логики.
 
 ## Что важно для проверки
 
-- **Качество распознавания**: pipeline не ограничивается OCR как есть. После детекции идут tracking, выбор лучшего crop, несколько OCR-веток, сверка с точным каталогом `db_hack`, проверка ценовых аномалий и дедупликация повторов.
+- **Качество распознавания**: pipeline не ограничивается OCR как есть. После детекции идут tracking, выбор лучшего crop, несколько OCR-веток, распознавание QR/barcode, сверка с `db_hack` при уверенном matching, проверка ценовых аномалий и дедупликация повторов.
 - **Соответствие формату**: результат экспортируется в CSV со схемой `sample.csv`, включая товарные поля, цены, скидки, barcode, QR-поля, координаты и служебные признаки.
-- **Воспроизводимость**: в репозитории есть Dockerfile, `docker-compose.yml`, проверка артефактов, README-инструкция и архив `artifacts_for_judges.zip` для полного запуска.
+- **Воспроизводимость**: в репозитории есть Dockerfile, `docker-compose.yml`, проверка артефактов, README-инструкция и Git LFS артефакты для полного запуска.
 - **Архитектура**: web/API, detector, OCR, catalog recovery, postprocess, хранилище результатов и review-отчёты разделены на понятные этапы.
 - **Масштабирование**: обработка естественно раскладывается по видео, кадрам и crops; добавлен выключенный по умолчанию worker-ready слой с очередью, heartbeat, retry и lease-lock, поэтому workers можно подключать без переписывания pipeline.
 - **Демонстрация**: есть живой web-стенд, загрузка MP4 через браузер, прогресс обработки, скачивание CSV и отдельный HTML/ZIP-отчёт для проверки сложных случаев.
@@ -52,7 +102,7 @@ flowchart TD
     H --> I[Numeric OCR]
     H --> J[Product-name OCR]
     I --> K[QR / barcode / price parser]
-    J --> L[Catalog recovery по db_hack]
+    J --> L[Catalog recovery по db_hack при уверенном matching]
     K --> M[Price sanity]
     L --> M
     M --> N[Dedup]
@@ -79,57 +129,56 @@ flowchart TD
 - **EasyOCR**: дополнительный OCR для сложных ценовых зон, прежде всего цена по карте и скидочные поля.
 - **Tesseract rus+eng**: product-name fast path, где важны длинные строки на русском и английском.
 - **PaddleOCR**: альтернативный/расширяемый путь для product-name и additional_info, оставлен в scripts для дальнейшего улучшения.
-- **Catalog recovery**: финальная сверка с `db_hack`, чтобы OCR-шум не превращался в произвольное название товара.
+- **Catalog recovery**: сверка с `db_hack` при достаточно уверенном совпадении, чтобы OCR-шум не превращался в произвольное название товара.
+- **QR decode**: QR/barcode зоны декодируются через `zxing` и OpenCV QR; финальный QR-priority pass работает только с валидно распознанным Lenta QR payload и сохраняет debug-артефакты для ручной проверки.
 
 Такой подход устойчивее, чем “один OCR на всё”: цена, barcode и название товара требуют разных preprocessing, разных confidence-порогов и разной логики восстановления.
 
 ## Быстрый запуск UI
 
 ```bash
-git clone https://github.com/R2NN/projecthack.git
+git lfs install
+git clone --branch feat/training-mode-appliance-20260523 https://github.com/R2NN/projecthack.git
 cd projecthack
+git lfs pull
 docker compose up --build
 ```
 
 Открыть:
 
 ```text
-http://localhost:5173
+http://127.0.0.1:8000/
 ```
 
-Без внешних артефактов поднимется web-интерфейс и API, а `/api/health` покажет, каких файлов не хватает для полного инференса.
+Если артефакты не скачались через Git LFS, web-интерфейс поднимется, а `/api/ready` и `tools/doctor.py` покажут, каких файлов не хватает для полного инференса.
 
 ## Полный запуск инференса в Docker
 
-1. Скачайте `artifacts_for_judges.zip` из корня репозитория.
-2. Распакуйте архив в корень проекта.
-3. Проверьте, что появилась структура:
+1. Выполните `git lfs pull`.
+2. Проверьте, что появилась структура:
 
 ```text
 artifacts/
-  db_hack.csv
+  data/
+    db_hack.csv
+    sample.csv
   models/
     rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth
+  special_symbol_templates/
+    full_tags/
 ```
 
-Архив хранится через Git LFS, поэтому при обычном `git clone` нужен установленный Git LFS. Если LFS не установлен, файл можно скачать с GitHub через браузер.
+Крупные файлы хранятся через Git LFS, поэтому при обычном `git clone` нужен установленный Git LFS.
 
 Проверка:
 
 ```bash
-python tools/check_artifacts.py
+python tools/doctor.py
 ```
 
 Запуск:
 
 ```bash
-INSTALL_PIPELINE_DEPS=true docker compose up --build
-```
-
-В PowerShell:
-
-```powershell
-$env:INSTALL_PIPELINE_DEPS="true"
 docker compose up --build
 ```
 
@@ -141,68 +190,59 @@ LENTA_TESSERACT_EXE=/usr/bin/tesseract
 LENTA_TESSDATA_DIR=/usr/share/tesseract-ocr/5/tessdata
 ```
 
-Если нужно отдельно собрать образ с Python-зависимостями pipeline:
-
-```bash
-docker build --build-arg INSTALL_PIPELINE_DEPS=true -t shelf-vision-full .
-```
-
 Для GPU в Docker нужен NVIDIA Container Toolkit и совместимые драйверы. В промышленном контуре web/API и GPU workers стоит запускать отдельными сервисами: web остаётся лёгким входным контуром, а обработчики масштабируются независимо.
 
 ## Артефакты модели и каталога
 
-Веса и каталог не лежат в обычной Git-истории как большие бинарные blob-файлы. Они приложены отдельным LFS-архивом:
-
-```text
-artifacts_for_judges.zip
-```
-
-Внутри архива:
+Веса, каталог и пример видео не лежат в обычной Git-истории как большие бинарные blob-файлы. Они хранятся через Git LFS:
 
 ```text
 artifacts/
-  db_hack.csv
+  data/
+    db_hack.csv
+    sample.csv
   models/
     rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth
+examples/
+  26_12-20.mp4
 ```
 
 Почему так:
 
 - checkpoint весит около 121 МБ;
 - модель является производным артефактом обучения;
-- архив даёт воспроизводимость без ручной передачи файлов;
+- Git LFS даёт воспроизводимость без ручной передачи файлов;
 - Git LFS не раздувает обычную историю исходного кода;
-- checkpoint можно заменить новым архивом без переписывания структуры проекта.
+- checkpoint можно заменить новым файлом без переписывания структуры проекта.
 
 ## Локальный Windows-запуск
 
 ```powershell
-cd web
-$env:LENTA_PIPELINE_ROOT="A:\lenta_pipeline\handoff_v19_speed_full_pipeline_20260518_040946"
-$env:LENTA_CATALOG_PATH="A:\lenta_data\db_hack.csv"
-$env:LENTA_DETECTOR_CHECKPOINT="A:\lenta_pipeline\handoff_v19_speed_full_pipeline_20260518_040946\models\rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth"
-$env:LENTA_WEB_RUNTIME_ROOT="A:\lenta_web_runtime"
-python server.py --host 127.0.0.1 --port 5173
+git lfs install
+git clone --branch feat/training-mode-appliance-20260523 https://github.com/R2NN/projecthack.git
+cd projecthack
+git lfs pull
+docker compose up --build
 ```
 
-Публичный стенд через Cloudflare Tunnel:
+Если на Windows мало места на системном диске, runtime можно вынести на другой диск через `.env`:
 
 ```powershell
-cd web
-.\start_public_site.ps1 -Restart
+Copy-Item .env.example .env
+# затем укажите HOST_RUNTIME_DIR в .env
 ```
 
 ## Результаты и отчёты
 
 После обработки создаются:
 
-- `combined_submission.csv` — итоговая выгрузка;
-- `manifest.json` — служебная информация по job;
-- `review/review_manifest.json` — данные crops для проверки;
-- `review/review_report.html` — HTML-отчёт по crops, открывается отдельной ссылкой после обработки;
-- `review/review_package.zip` — автономный пакет с HTML-отчётом, manifest и изображениями crops;
-- `uncertain_predictions/<job_id>/` — неуверенные предсказания для ревью и будущего обучения;
-- `lenta_results.sqlite` — база с jobs, строками CSV, review items и агрегатами.
+- `runtime/jobs/<job_id>/final_submission.csv` — итоговая выгрузка;
+- `runtime/jobs/<job_id>/final_submission.json` — JSON-версия результата;
+- `runtime/jobs/<job_id>/metrics.json` — метрики job;
+- `runtime/jobs/<job_id>/pipeline_manifest.json` — служебная информация по запуску;
+- `runtime/jobs/<job_id>/review.html` — HTML-отчёт по crops/результату, если сохранён;
+- `runtime/jobs/<job_id>/crops/` — crops для проверки, если включено сохранение;
+- `runtime/lenta_results.sqlite` — база с jobs, строками CSV, review items и агрегатами.
 
 На главном экране crops не показываются сеткой, чтобы интерфейс оставался чистым. Для проверки сложных случаев есть отдельный HTML-отчёт и записи в SQLite.
 
@@ -211,7 +251,9 @@ cd web
 API:
 
 ```text
-GET /api/metrics
+GET /api/system/metrics
+GET /api/jobs/summary
+GET /api/jobs/<job_id>/metrics
 ```
 
 Уже считаются:
@@ -251,7 +293,7 @@ GET /api/metrics
 - atomic claim через `BEGIN IMMEDIATE` и lease-lock защищает от ситуации, когда два worker берут один job;
 - `attempts` и `max_attempts` дают retry после временных ошибок;
 - `worker_heartbeats` хранит живые обработчики, host, pid и время последнего сигнала;
-- `web/worker.py` забирает задачу и запускает тот же самый inference pipeline без изменения ML-кода;
+- queue contract уже отделён от ML-кода; отдельные worker runner/compose-сервисы можно подключать поверх этого контракта без переписывания inference pipeline;
 - `GET /api/queue` показывает состояние очереди, recent tasks и активные workers.
 
 Почему это важно:
@@ -280,28 +322,9 @@ Web/API
 
 Такой контракт позволяет добавлять обработчики горизонтально: один worker может обрабатывать одно видео или батч crops, а общий reducer собирает результат в тот же формат `sample.csv`. При росте нагрузки добавляются новые контейнеры `shelf-worker`, при падении worker задача возвращается в очередь после истечения lease или retry.
 
-### Запуск worker-режима
+### Запуск queue-режима
 
-Локальный запуск с workers:
-
-```bash
-LENTA_JOB_EXECUTION_MODE=queue docker compose --profile workers up --build --scale shelf-worker=2
-```
-
-В PowerShell:
-
-```powershell
-$env:LENTA_JOB_EXECUTION_MODE="queue"
-docker compose --profile workers up --build --scale shelf-worker=2
-```
-
-Проверка очереди без тяжёлого inference:
-
-```bash
-python tools/test_worker_queue.py
-```
-
-Этот тест проверяет claim задач, отсутствие двойной выдачи одной задачи, retry и финальный статус. Он не запускает ML-инференс и не влияет на качество модели.
+В clean appliance основной путь — локальный режим `docker compose up --build`. Queue-ready слой оставлен как архитектурный контракт внутри web/API: `WORKER_MODE=queue` кладёт задачи в SQLite-очередь, а внешний worker runner может забирать их через тот же `worker_queue.py` без изменения ML pipeline. Отдельный worker compose-профиль не включён в минимальную поставку, чтобы не плодить конкурирующие способы запуска.
 
 ## Почему решение масштабируется
 
@@ -373,14 +396,14 @@ CPU-only режим технически возможен для части pipe
 - `sample.csv` только как header-схема итоговой выгрузки;
 - Docker/compose/инструкции;
 - скрипты проверки окружения.
-- `artifacts_for_judges.zip` через Git LFS для воспроизведения проверки.
+- Git LFS артефакты: checkpoint, каталог, sample schema и пример видео.
 
 Почему это важно:
 
 - рабочие видео, логи и промежуточные crops не попадают в публичную историю Git;
 - веса модели упакованы отдельно и могут быть заменены новым checkpoint без изменения кода;
 - third-party библиотеки не vendored в проект, а устанавливаются через package managers;
-- зависимости можно проверить по `pipeline/requirements-gpu.txt`;
+- зависимости можно проверить по `pipeline/requirements-appliance.txt`, `pipeline/requirements-appliance-gpu.txt` и `pipeline/requirements-training-gpu.txt`;
 - поставка воспроизводима: код, Docker-инструкция и нужные артефакты находятся по одной ссылке.
 
 
@@ -390,10 +413,10 @@ CPU-only режим технически возможен для части pipe
 .
 ├── web/                 # UI, API, jobs, metrics, SQLite writer, worker process
 ├── pipeline/            # inference/training pipeline без весов и датасетов
-├── artifacts/           # локальные внешние артефакты, не коммитятся
+├── artifacts/           # Git LFS и подключаемые артефакты модели/каталога
 ├── tools/               # проверки окружения
-├── artifacts_for_judges.zip
 ├── Dockerfile
+├── Dockerfile.gpu
 ├── docker-compose.yml
 └── README.md
 ```
@@ -401,12 +424,11 @@ CPU-only режим технически возможен для части pipe
 ## Проверки
 
 ```bash
-python -m py_compile web/server.py web/worker.py web/worker_queue.py tools/test_worker_queue.py
-python tools/test_worker_queue.py
+python -m py_compile web/server.py web/worker_queue.py tools/doctor.py tools/check_artifacts.py
 node --check web/app.js
 python -m compileall pipeline/scripts
-python tools/check_artifacts.py
+python tools/doctor.py
 docker compose config
 ```
 
-`check_artifacts.py` завершится ошибкой на чистом clone, если `artifacts_for_judges.zip` ещё не распакован в `artifacts/`. Это ожидаемо.
+`doctor.py` покажет понятные ошибки, если Git LFS артефакты ещё не скачаны или runtime недоступен.

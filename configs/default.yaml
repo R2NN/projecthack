@@ -1,0 +1,36 @@
+project:
+  name: lenta-shelf-vision
+
+paths:
+  runtime_dir: ${RUNTIME_DIR:-./runtime}
+  artifacts_dir: ${ARTIFACTS_DIR:-./artifacts}
+  detector_checkpoint: ${LENTA_DETECTOR_CHECKPOINT:-./artifacts/models/rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth}
+  catalog_csv: ${LENTA_CATALOG_PATH:-./artifacts/data/db_hack.csv}
+  sample_csv: ./artifacts/data/sample.csv
+  special_symbol_templates: ./artifacts/special_symbol_templates/full_tags
+
+inference:
+  powershell: ${LENTA_POWERSHELL:-powershell.exe}
+  python: ${LENTA_PIPELINE_PYTHON:-python}
+  tesseract_exe: ${LENTA_TESSERACT_EXE:-tesseract}
+  tessdata_dir: ${LENTA_TESSDATA_DIR:-}
+  numeric_jobs: 8
+  tesseract_jobs: 8
+  qr_workers: 6
+
+web:
+  host: 127.0.0.1
+  port: ${WEB_PORT:-5173}
+  max_upload_bytes: 536870912
+
+training:
+  data_root: ${TRAINING_DATA_DIR:-./artifacts/training_data}
+  dataset_dir: ${TRAINING_DATASET_DIR:-./runtime/training/datasets/rfdetr_price_tag_all_annotated_tiled1280}
+  run_dir: ${TRAINING_RUN_DIR:-./runtime/training/runs/rfdetr_small_price_tag_all_annotated_tiled1280_e8}
+  model_output_path: ${TRAINING_MODEL_OUTPUT_PATH:-./runtime/training/models/rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth}
+  pretrain_weights: ${RFDETR_PRETRAIN_WEIGHTS:-./rf-detr-small.pth}
+  epochs: 8
+  batch_size: 4
+  grad_accum_steps: 4
+  resolution: 512
+  device: cuda

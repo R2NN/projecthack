@@ -1,0 +1,5 @@
+# NVIDIA GPU training dependency set.
+# This is intentionally separate from requirements-appliance-gpu.txt so the
+# normal inference appliance does not install RF-DETR training extras.
+-r requirements-appliance-gpu.txt
+rfdetr[train,loggers]==1.6.5.post1

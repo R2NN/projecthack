@@ -37,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr-encoder", type=float, default=1.5e-4)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--pretrain-weights", default="")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--run-test", action="store_true")
     parser.add_argument("--class-name", default="price_tag")
@@ -53,7 +54,10 @@ def main() -> None:
     )
 
     model_cls = MODEL_CLASSES[args.model_size]
-    model = model_cls(num_classes=1, resolution=args.resolution)
+    model_kwargs = {"num_classes": 1, "resolution": args.resolution}
+    if args.pretrain_weights:
+        model_kwargs["pretrain_weights"] = str(args.pretrain_weights)
+    model = model_cls(**model_kwargs)
     model.train(
         dataset_dir=str(args.dataset_dir),
         output_dir=str(args.output_dir),
