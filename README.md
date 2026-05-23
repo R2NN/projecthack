@@ -30,7 +30,7 @@ https://apt-valley-plugins-therefore.trycloudflare.com/api/health
 
 ```bash
 git lfs install
-git clone --branch feat/training-mode-appliance-20260523 https://github.com/R2NN/projecthack.git
+git clone https://github.com/R2NN/projecthack.git
 cd projecthack
 git lfs pull
 ```
@@ -200,7 +200,7 @@ examples/
 
 ```powershell
 git lfs install
-git clone --branch feat/training-mode-appliance-20260523 https://github.com/R2NN/projecthack.git
+git clone https://github.com/R2NN/projecthack.git
 cd projecthack
 git lfs pull
 docker compose up --build
