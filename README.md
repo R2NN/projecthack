@@ -23,7 +23,7 @@ https://apt-valley-plugins-therefore.trycloudflare.com/api/health
 - Docker Desktop или Docker Engine с Docker Compose;
 - Git LFS для скачивания модели, каталога и примера видео;
 - интернет для первой сборки Docker image и загрузки Python/OCR/RF-DETR артефактов;
-- для GPU inference и training: NVIDIA driver и NVIDIA Container Toolkit;
+- для основного GPU inference и training: NVIDIA driver и NVIDIA Container Toolkit;
 - для training: размеченные данные в формате `<name>/<name>.mp4` + `<name>/<name>.csv`.
 
 Скачать проект:
@@ -35,7 +35,21 @@ cd projecthack
 git lfs pull
 ```
 
-Режим 1 — inference с готовыми весами:
+Режим 1 — inference с готовыми весами.
+
+Рекомендуемый GPU-запуск для NVIDIA:
+
+```bash
+docker compose --profile gpu up --build shelf-vision-gpu
+```
+
+Открыть:
+
+```text
+http://127.0.0.1:8001/
+```
+
+CPU fallback, если NVIDIA GPU или NVIDIA Container Toolkit недоступны:
 
 ```bash
 docker compose up --build
@@ -141,14 +155,16 @@ git lfs install
 git clone --branch feat/training-mode-appliance-20260523 https://github.com/R2NN/projecthack.git
 cd projecthack
 git lfs pull
-docker compose up --build
+docker compose --profile gpu up --build shelf-vision-gpu
 ```
 
 Открыть:
 
 ```text
-http://127.0.0.1:8000/
+http://127.0.0.1:8001/
 ```
+
+Если NVIDIA GPU недоступна, используйте CPU fallback: `docker compose up --build` и откройте `http://127.0.0.1:8000/`.
 
 Если артефакты не скачались через Git LFS, web-интерфейс поднимется, а `/api/ready` и `tools/doctor.py` покажут, каких файлов не хватает для полного инференса.
 
@@ -176,11 +192,21 @@ artifacts/
 python tools/doctor.py
 ```
 
-Запуск:
+GPU-запуск для NVIDIA:
+
+```bash
+docker compose --profile gpu up --build shelf-vision-gpu
+```
+
+По умолчанию GPU UI будет на `http://127.0.0.1:8001/`.
+
+CPU fallback:
 
 ```bash
 docker compose up --build
 ```
+
+CPU UI будет на `http://127.0.0.1:8000/`.
 
 Контейнер использует Python 3.12, изолированное окружение `/opt/venv` для Python-зависимостей pipeline и Linux-пути к системным бинарям:
 
