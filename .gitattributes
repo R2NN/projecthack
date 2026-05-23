@@ -7,7 +7,6 @@
 *.html text eol=lf
 *.md text eol=lf
 *.csv text eol=lf
-artifacts_for_judges.zip filter=lfs diff=lfs merge=lfs -text
 artifacts/models/*.pth filter=lfs diff=lfs merge=lfs -text
 artifacts/data/db_hack.csv filter=lfs diff=lfs merge=lfs -text
 examples/*.mp4 filter=lfs diff=lfs merge=lfs -text
