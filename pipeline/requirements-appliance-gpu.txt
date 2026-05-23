@@ -1,0 +1,20 @@
+# Optional NVIDIA GPU dependency set.
+# torch/torchvision/CUDA come from Dockerfile.gpu base image:
+# pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime
+numpy==2.3.5
+pandas==2.3.3
+pillow==12.2.0
+opencv-python-headless==4.13.0.92
+scipy==1.17.1
+scikit-learn==1.8.0
+psutil==7.2.2
+zxing-cpp==3.0.0
+onnxruntime==1.26.0
+rapidocr==3.8.1
+rapidocr-onnxruntime==1.4.4
+easyocr==1.7.2
+rfdetr==1.6.5.post1
+supervision==0.27.0.post2
+transformers==5.8.1
+tqdm==4.67.3
+PyYAML==6.0.3

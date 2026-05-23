@@ -6,14 +6,66 @@ const API_JOB_UPLOAD_CHUNK_ENDPOINT = (jobId, uploadId, offset) =>
 const API_JOB_START_ENDPOINT = (jobId) => `/api/jobs/${encodeURIComponent(jobId)}/start`;
 const API_JOB_STATUS_ENDPOINT = (jobId) => `/api/jobs/${encodeURIComponent(jobId)}/status`;
 const API_JOB_CSV_ENDPOINT = (jobId) => `/api/jobs/${encodeURIComponent(jobId)}/csv`;
+const API_JOB_JSON_ENDPOINT = (jobId) => `/api/jobs/${encodeURIComponent(jobId)}/json`;
+const API_SYSTEM_METRICS_ENDPOINT = "/api/system/metrics";
+const API_JOBS_SUMMARY_ENDPOINT = "/api/jobs/summary";
+const API_JOB_METRICS_ENDPOINT = (jobId) => `/api/jobs/${encodeURIComponent(jobId)}/metrics`;
 const STATUS_POLL_INTERVAL_MS = 1400;
+const DASHBOARD_SYSTEM_INTERVAL_MS = 3000;
+const DASHBOARD_JOBS_INTERVAL_MS = 7000;
+
+if ("scrollRestoration" in history) {
+  history.scrollRestoration = "manual";
+}
+
+if (!window.location.hash) {
+  window.scrollTo(0, 0);
+  window.addEventListener(
+    "load",
+    () => {
+      window.scrollTo(0, 0);
+    },
+    { once: true },
+  );
+}
+
+const TIMING_LABELS = {
+  "01_detection_tracking": "detection",
+  "02_export_ocr_zones": "OCR zones",
+  "03_numeric_ocr": "numeric OCR / QR",
+  "04_tesseract_product_name": "product OCR",
+  "05_crop_quality_reselect": "crop quality",
+  "06_catalog_recovery_db_hack": "catalog recovery",
+  "07_fill_aux_barcode": "aux / barcode",
+  "08_deduplicate_rows": "dedup",
+  "09_export_final_submission_with_qr_priority": "final CSV / QR priority",
+};
+
+const STATUS_LABELS = {
+  uploading: "загрузка",
+  queued: "в очереди",
+  running: "в работе",
+  done: "готово",
+  failed: "ошибка",
+  idle: "ожидание",
+  unknown: "неизвестно",
+  unavailable: "недоступно",
+};
 
 const state = {
   videos: [],
   activeId: "",
   csvUrl: "",
+  jsonUrl: "",
   isProcessing: false,
   previewCollapsed: false,
+  dashboard: {
+    selectedJobId: "",
+    activeJobId: "",
+    lastJobs: [],
+    systemTimer: 0,
+    jobsTimer: 0,
+  },
 };
 
 const dropzone = document.querySelector("#dropzone");
@@ -37,12 +89,31 @@ const progressBar = document.querySelector("#progress-bar");
 const noticeText = document.querySelector("#notice-text");
 const runButton = document.querySelector("#run-button");
 const downloadCsv = document.querySelector("#download-csv");
+const downloadJson = document.querySelector("#download-json");
 const downloadReview = document.querySelector("#download-review");
 const downloadReviewZip = document.querySelector("#download-review-zip");
 const videoModal = document.querySelector("#video-modal");
 const videoModalBackdrop = document.querySelector("#video-modal-backdrop");
 const modalClose = document.querySelector("#modal-close");
 const modalVideo = document.querySelector("#modal-video");
+const dashboardRefresh = document.querySelector("#dashboard-refresh");
+const metricCpu = document.querySelector("#metric-cpu");
+const metricRam = document.querySelector("#metric-ram");
+const metricGpu = document.querySelector("#metric-gpu");
+const metricDisk = document.querySelector("#metric-disk");
+const metricWorkers = document.querySelector("#metric-workers");
+const jobsAverage = document.querySelector("#jobs-average");
+const jobsQueued = document.querySelector("#jobs-queued");
+const jobsRunning = document.querySelector("#jobs-running");
+const jobsDone = document.querySelector("#jobs-done");
+const jobsFailed = document.querySelector("#jobs-failed");
+const jobList = document.querySelector("#job-list");
+const currentJobStatus = document.querySelector("#current-job-status");
+const currentJobBody = document.querySelector("#current-job-body");
+const timingTotal = document.querySelector("#timing-total");
+const timingBars = document.querySelector("#timing-bars");
+const qualityRows = document.querySelector("#quality-rows");
+const qualityBody = document.querySelector("#quality-body");
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) {
@@ -67,6 +138,429 @@ function formatDuration(seconds) {
   return `${minutes}:${rest}`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatSecondsCompact(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value <= 0) {
+    return "--";
+  }
+  if (value < 60) {
+    return `${Math.round(value)}s`;
+  }
+  if (value < 3600) {
+    return `${Math.floor(value / 60)}m ${Math.round(value % 60)}s`;
+  }
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.round((value % 3600) / 60);
+  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+function formatPercent(value) {
+  const percent = Number(value);
+  return Number.isFinite(percent) ? `${percent.toFixed(percent >= 10 ? 0 : 1)}%` : "--";
+}
+
+function formatDateShort(value) {
+  if (!value) {
+    return "--";
+  }
+  const date = parseApiDate(value);
+  if (Number.isNaN(date.getTime())) {
+    return "--";
+  }
+  return date.toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function severityClass(percent) {
+  const value = Number(percent);
+  if (!Number.isFinite(value)) {
+    return "is-muted";
+  }
+  if (value >= 90) {
+    return "is-critical";
+  }
+  if (value >= 75) {
+    return "is-warning";
+  }
+  return "is-ok";
+}
+
+function parseApiDate(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return new Date(Number.NaN);
+  }
+  const normalized = text.replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+  return new Date(normalized);
+}
+
+function liveProcessingSeconds(metrics) {
+  const base = Number(metrics.processing_sec || 0);
+  if (!["running", "queued", "uploading"].includes(metrics.status)) {
+    return base;
+  }
+  const job = state.dashboard.lastJobs.find((item) => item.job_id === metrics.job_id);
+  const createdAt = parseApiDate(job?.created_at);
+  if (Number.isNaN(createdAt.getTime())) {
+    return base;
+  }
+  return Math.max(base, (Date.now() - createdAt.getTime()) / 1000);
+}
+
+function etaPhrase(metrics) {
+  if (!metrics || !["running", "queued", "uploading"].includes(metrics.status)) {
+    return metrics?.status === "done" ? "Обработка завершена" : "";
+  }
+  if (metrics.eta_sec === null || metrics.eta_sec === undefined) {
+    return "До конца осталось: оцениваем";
+  }
+  return `До конца осталось примерно ${formatSecondsCompact(metrics.eta_sec)}`;
+}
+
+function throughputText(metrics) {
+  const processing = Number(metrics?.processing_sec || 0);
+  const duration = Number(metrics?.video_duration_sec || 0);
+  if (!Number.isFinite(processing) || !Number.isFinite(duration) || processing <= 0 || duration <= 0) {
+    return "";
+  }
+  const minutesPerMinute = processing / duration;
+  const formatted = minutesPerMinute >= 10 ? Math.round(minutesPerMinute) : minutesPerMinute.toFixed(1);
+  return `Скорость: 1 мин видео ≈ ${formatted} мин обработки`;
+}
+
+function jobLogUrl(job) {
+  if (job.log_url) {
+    return job.log_url;
+  }
+  const jobId = String(job.job_id || "");
+  const filename = String(job.filename || "");
+  if (!jobId || !filename) {
+    return "";
+  }
+  const stem = filename.replace(/\.[^.]+$/, "");
+  return `/api/jobs/${encodeURIComponent(jobId)}/artifact?path=${encodeURIComponent(`outputs/${stem}.log`)}`;
+}
+
+function statusLabel(status) {
+  return STATUS_LABELS[status] || status || STATUS_LABELS.unknown;
+}
+
+function progressHtml(percent, className = "") {
+  const value = Math.max(0, Math.min(100, Number(percent) || 0));
+  return `<div class="metric-progress ${className}"><span style="width: ${value}%"></span></div>`;
+}
+
+async function fetchJson(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await readErrorResponse(response));
+  }
+  return response.json();
+}
+
+function renderMetricCard(element, title, value, detail, percent, options = {}) {
+  if (!element) {
+    return;
+  }
+  const severity = options.severity || severityClass(percent);
+  element.innerHTML = `
+    <div class="metric-top">
+      <span>${escapeHtml(title)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+    ${Number.isFinite(Number(percent)) ? progressHtml(percent, severity) : ""}
+    <p>${escapeHtml(detail || "")}</p>
+  `;
+  element.classList.remove("is-ok", "is-warning", "is-critical", "is-muted");
+  element.classList.add(severity);
+}
+
+function renderSystemMetrics(metrics) {
+  const ram = metrics.ram || {};
+  const disk = metrics.disk || {};
+  const gpu = metrics.gpu || {};
+  const workers = metrics.workers || {};
+  renderMetricCard(metricCpu, "CPU", formatPercent(metrics.cpu_percent), "локальный inference host", Number(metrics.cpu_percent));
+  renderMetricCard(
+    metricRam,
+    "RAM",
+    formatPercent(ram.percent),
+    `${ram.used_gb ?? 0} / ${ram.total_gb ?? 0} GB`,
+    Number(ram.percent),
+  );
+  if (gpu.available) {
+    const vramPercent = gpu.vram_total_gb > 0 ? (Number(gpu.vram_used_gb) / Number(gpu.vram_total_gb)) * 100 : 0;
+    renderMetricCard(
+      metricGpu,
+      "GPU",
+      formatPercent(gpu.util_percent),
+      `${gpu.name || "NVIDIA"} · ${gpu.vram_used_gb} / ${gpu.vram_total_gb} GB VRAM`,
+      vramPercent,
+    );
+  } else {
+    renderMetricCard(metricGpu, "GPU", "offline", "GPU не обнаружена", Number.NaN, { severity: "is-muted" });
+  }
+  renderMetricCard(
+    metricDisk,
+    "Disk",
+    `${disk.free_gb ?? 0} GB free`,
+    disk.runtime_path || "runtime",
+    Number(disk.percent),
+  );
+  const activeWorkers = Number(workers.active || 0);
+  const availableWorkers = Number(workers.available || 0);
+  const totalWorkers = Math.max(1, activeWorkers + availableWorkers);
+  renderMetricCard(
+    metricWorkers,
+    "Workers",
+    `${activeWorkers}/${totalWorkers}`,
+    `${workers.mode || "local"} · занято ${activeWorkers}, свободно ${availableWorkers} · OCR jobs ${workers.ocr_jobs ?? "--"}`,
+    (activeWorkers / totalWorkers) * 100,
+    { severity: activeWorkers ? "is-warning" : "is-ok" },
+  );
+  dashboardRefresh.textContent = `Обновлено ${formatDateShort(metrics.timestamp)}`;
+}
+
+function renderSystemUnavailable() {
+  renderMetricCard(metricCpu, "CPU", "--", "метрики недоступны", Number.NaN, { severity: "is-muted" });
+  renderMetricCard(metricRam, "RAM", "--", "метрики недоступны", Number.NaN, { severity: "is-muted" });
+  renderMetricCard(metricGpu, "GPU", "offline", "GPU не обнаружена", Number.NaN, { severity: "is-muted" });
+  renderMetricCard(metricDisk, "Disk", "--", "метрики недоступны", Number.NaN, { severity: "is-muted" });
+  renderMetricCard(metricWorkers, "Workers", "--", "метрики недоступны", Number.NaN, { severity: "is-muted" });
+  dashboardRefresh.textContent = "Метрики временно недоступны";
+}
+
+function renderJobsSummary(summary) {
+  const jobs = Array.isArray(summary.last_jobs) ? summary.last_jobs : [];
+  state.dashboard.lastJobs = jobs;
+  jobsQueued.textContent = Number(summary.queued || 0);
+  jobsRunning.textContent = Number(summary.running || 0);
+  jobsDone.textContent = Number(summary.done || 0);
+  jobsFailed.textContent = Number(summary.failed || 0);
+  jobsAverage.textContent = summary.avg_processing_sec ? `среднее ${formatSecondsCompact(summary.avg_processing_sec)}` : "среднее --";
+
+  if (!jobs.length) {
+    jobList.innerHTML = `<div class="empty-state">Задач пока нет</div>`;
+    state.dashboard.selectedJobId = "";
+    state.dashboard.activeJobId = "";
+    return;
+  }
+
+  const active = jobs.find((job) => ["running", "queued", "uploading"].includes(job.status));
+  state.dashboard.activeJobId = active ? active.job_id : "";
+  const hasSelected = jobs.some((job) => job.job_id === state.dashboard.selectedJobId);
+  if (!hasSelected) {
+    state.dashboard.selectedJobId = (active || jobs[0]).job_id;
+  }
+
+  jobList.innerHTML = jobs
+    .map((job) => {
+      const selected = job.job_id === state.dashboard.selectedJobId ? "is-selected" : "";
+      const logUrl = job.status === "failed" ? jobLogUrl(job) : "";
+      return `
+        <article class="job-row ${selected}" data-job-id="${escapeHtml(job.job_id)}">
+          <button class="job-row-main" type="button" data-job-id="${escapeHtml(job.job_id)}">
+            <span>
+              <strong>${escapeHtml(job.filename || job.job_id)}</strong>
+              <small>${escapeHtml(job.job_id)} · ${formatDateShort(job.finished_at || job.created_at)}</small>
+            </span>
+            <span class="job-status ${escapeHtml(job.status)}">${escapeHtml(statusLabel(job.status))}</span>
+          </button>
+          ${logUrl ? `<a class="job-log-link" href="${escapeHtml(logUrl)}" target="_blank" rel="noreferrer">log</a>` : ""}
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function renderCurrentJob(metrics) {
+  if (!metrics) {
+    currentJobStatus.textContent = STATUS_LABELS.idle;
+    currentJobBody.innerHTML = `<div class="empty-state">Нет активных задач</div>`;
+    return;
+  }
+  currentJobStatus.textContent = statusLabel(metrics.status);
+  const processingSeconds = liveProcessingSeconds(metrics);
+  const etaText = etaPhrase(metrics);
+  currentJobBody.innerHTML = `
+    <div class="job-hero">
+      <strong>${escapeHtml(metrics.filename || metrics.job_id)}</strong>
+      <span>${escapeHtml(metrics.current_stage || metrics.status)}</span>
+    </div>
+    ${progressHtml(metrics.progress || 0, severityClass(metrics.progress || 0))}
+    ${etaText ? `<div class="eta-note">${escapeHtml(etaText)}</div>` : ""}
+    <div class="job-detail-grid">
+      <div><span>прогресс</span><strong>${formatPercent(metrics.progress || 0)}</strong></div>
+      <div><span>видео</span><strong>${formatSecondsCompact(metrics.video_duration_sec)}</strong></div>
+      <div><span>обработка</span><strong>${formatSecondsCompact(processingSeconds)}</strong></div>
+    </div>
+  `;
+}
+
+function renderTiming(metrics) {
+  const timings = metrics && Array.isArray(metrics.timings) ? metrics.timings : [];
+  if (!timings.length) {
+    timingTotal.textContent = "--";
+    timingBars.innerHTML = `<div class="empty-state">Timing появится после старта pipeline</div>`;
+    return;
+  }
+  const total = timings.reduce((sum, item) => sum + Number(item.seconds || 0), 0);
+  const max = Math.max(...timings.map((item) => Number(item.seconds || 0)), 1);
+  timingTotal.textContent = formatSecondsCompact(total);
+  timingBars.innerHTML = timings
+    .map((item) => {
+      const seconds = Number(item.seconds || 0);
+      const width = Math.max(2, (seconds / max) * 100);
+      const label = TIMING_LABELS[item.step] || item.step;
+      return `
+        <div class="timing-row">
+          <div class="timing-row-label">
+            <span>${escapeHtml(label)}</span>
+            <strong>${formatSecondsCompact(seconds)}</strong>
+          </div>
+          <div class="timing-track"><span style="width: ${width}%"></span></div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderQuality(metrics) {
+  if (!metrics) {
+    qualityRows.textContent = "0 rows";
+    qualityBody.innerHTML = `<div class="empty-state">Готовых результатов пока нет</div>`;
+    return;
+  }
+  const fillRate = metrics.fill_rate || {};
+  const quality = metrics.quality || {};
+  const fields = [
+    ["product_name", "product_name"],
+    ["price_card", "price_card"],
+    ["price_default", "price_default"],
+    ["barcode", "barcode"],
+    ["discount_amount", "discount"],
+  ];
+  const links = metrics.artifacts || {};
+  qualityRows.textContent = `${metrics.rows} rows`;
+  const artifactItems = [
+    ["CSV", "ready", Boolean(links.csv_url || links.csv_ready)],
+    ["Review", "ready", Boolean(links.review_url || links.review_ready)],
+    ["Debug", "ready", Boolean(links.debug_url || links.debug_ready)],
+    ["Crops", "saved", Boolean(links.crops_saved)],
+  ];
+  const artifactStatusHtml = artifactItems
+    .map(
+      ([label, readyText, ready]) => `
+        <div class="artifact-status ${ready ? "is-ready" : "is-missing"}">
+          <strong>${escapeHtml(`${label} ${ready ? readyText : "missing"}`)}</strong>
+        </div>
+      `,
+    )
+    .join("");
+  const throughputHtml = throughputText(metrics)
+    ? `<div class="business-throughput"><span>Throughput</span><strong>${escapeHtml(throughputText(metrics))}</strong></div>`
+    : "";
+  if (!metrics.rows) {
+    qualityBody.innerHTML = `
+      ${throughputHtml}
+      <div class="artifact-status-grid">${artifactStatusHtml}</div>
+      <div class="empty-state">Готовых результатов пока нет</div>
+    `;
+    return;
+  }
+  const fieldHtml = fields
+    .map(([key, label]) => {
+      const percent = Number(fillRate[key] || 0) * 100;
+      return `
+        <div class="quality-rate">
+          <span>${escapeHtml(label)}</span>
+          <strong>${formatPercent(percent)}</strong>
+          ${progressHtml(percent, severityClass(100 - percent))}
+        </div>
+      `;
+    })
+    .join("");
+  const linkHtml = [
+    links.csv_url ? `<a href="${escapeHtml(links.csv_url)}" download>CSV</a>` : "",
+    links.json_url ? `<a href="${escapeHtml(links.json_url)}" download>JSON</a>` : "",
+    links.review_url ? `<a href="${escapeHtml(links.review_url)}" target="_blank" rel="noreferrer">review</a>` : "",
+    links.debug_url ? `<a href="${escapeHtml(links.debug_url)}" target="_blank" rel="noreferrer">debug</a>` : "",
+  ]
+    .filter(Boolean)
+    .join("");
+  qualityBody.innerHTML = `
+    ${throughputHtml}
+    <div class="artifact-status-grid">${artifactStatusHtml}</div>
+    <div class="quality-rates">${fieldHtml}</div>
+    <div class="quality-alerts">
+      <div><strong>${quality.suspicious_rows ?? 0}</strong><span>подозрительные строки</span></div>
+      <div><strong>${quality.price_outliers ?? 0}</strong><span>price outliers</span></div>
+      <div><strong>${quality.empty_barcode ?? 0}</strong><span>empty barcode</span></div>
+    </div>
+    <div class="artifact-links">${linkHtml || "<span>Артефактов пока нет</span>"}</div>
+  `;
+}
+
+async function refreshSystemMetrics() {
+  try {
+    renderSystemMetrics(await fetchJson(API_SYSTEM_METRICS_ENDPOINT));
+  } catch (_error) {
+    renderSystemUnavailable();
+  }
+}
+
+async function refreshSelectedJobMetrics() {
+  const jobId = state.dashboard.selectedJobId;
+  if (!jobId) {
+    renderCurrentJob(null);
+    renderTiming(null);
+    renderQuality(null);
+    return;
+  }
+  try {
+    const metrics = await fetchJson(API_JOB_METRICS_ENDPOINT(jobId));
+    let activeMetrics = null;
+    if (state.dashboard.activeJobId) {
+      activeMetrics =
+        state.dashboard.activeJobId === jobId
+          ? metrics
+          : await fetchJson(API_JOB_METRICS_ENDPOINT(state.dashboard.activeJobId));
+    }
+    renderCurrentJob(activeMetrics);
+    renderTiming(metrics);
+    renderQuality(metrics);
+  } catch (_error) {
+    currentJobStatus.textContent = STATUS_LABELS.unavailable;
+    currentJobBody.innerHTML = `<div class="empty-state">Метрики задачи временно недоступны</div>`;
+    renderTiming(null);
+    renderQuality(null);
+  }
+}
+
+async function refreshJobsDashboard() {
+  try {
+    const summary = await fetchJson(API_JOBS_SUMMARY_ENDPOINT);
+    renderJobsSummary(summary);
+    await refreshSelectedJobMetrics();
+  } catch (_error) {
+    jobList.innerHTML = `<div class="empty-state">Список задач временно недоступен</div>`;
+    await refreshSelectedJobMetrics();
+  }
+}
+
 function pluralizeVideo(count) {
   const mod10 = count % 10;
   const mod100 = count % 100;
@@ -78,9 +572,30 @@ function pluralizeVideo(count) {
   return `${count} видео`;
 }
 
+function pluralizeUpload(count) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) {
+    return `${count} файл`;
+  }
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
+    return `${count} файла`;
+  }
+  return `${count} файлов`;
+}
+
 function isMp4(file) {
   const name = file.name.toLowerCase();
   return file.type === "video/mp4" || name.endsWith(".mp4");
+}
+
+function isZip(file) {
+  const name = file.name.toLowerCase();
+  return file.type === "application/zip" || file.type === "application/x-zip-compressed" || name.endsWith(".zip");
+}
+
+function isProcessableFile(file) {
+  return isMp4(file) || isZip(file);
 }
 
 function isTooLarge(file) {
@@ -110,10 +625,15 @@ function resetCsv() {
   }
 
   state.csvUrl = "";
+  state.jsonUrl = "";
   downloadCsv.href = "#";
   downloadCsv.hidden = true;
   downloadCsv.classList.add("disabled");
   downloadCsv.setAttribute("aria-disabled", "true");
+  downloadJson.href = "#";
+  downloadJson.hidden = true;
+  downloadJson.classList.add("disabled");
+  downloadJson.setAttribute("aria-disabled", "true");
   downloadReview.href = "#";
   downloadReview.hidden = true;
   downloadReview.classList.add("disabled");
@@ -153,12 +673,14 @@ function getActiveVideo() {
 
 function updateControls() {
   const hasVideos = state.videos.length > 0;
+  const activeVideo = getActiveVideo();
+  const canPreviewActive = Boolean(activeVideo && isMp4(activeVideo.file));
   uploadCard.classList.toggle("has-files", hasVideos);
   uploadCard.classList.toggle("preview-collapsed", hasVideos && state.previewCollapsed && !state.csvUrl);
   runButton.disabled = !hasVideos || state.isProcessing;
   filesPanel.hidden = !hasVideos;
-  previewWrap.hidden = !hasVideos;
-  filesCount.textContent = pluralizeVideo(state.videos.length);
+  previewWrap.hidden = !hasVideos || !canPreviewActive;
+  filesCount.textContent = pluralizeUpload(state.videos.length);
   togglePreview.textContent = state.previewCollapsed ? "Показать" : "Скрыть";
   togglePreview.insertAdjacentHTML(
     "beforeend",
@@ -179,14 +701,18 @@ function renderFileList() {
   fileList.innerHTML = state.videos
     .map((video) => {
       const isActive = video.id === state.activeId;
-      const meta = video.meta.loaded
+      const isArchive = isZip(video.file);
+      const meta = isArchive
+        ? `${formatBytes(video.file.size)} · ZIP архив с MP4`
+        : video.meta.loaded
         ? `${formatBytes(video.file.size)} · ${formatDuration(video.meta.duration)} · ${video.meta.width}×${video.meta.height}`
         : `${formatBytes(video.file.size)} · метаданные читаются`;
+      const badge = isArchive ? "ZIP" : "MP4";
 
       return `
         <li class="file-item ${isActive ? "is-active" : ""}" data-id="${escapeHtml(video.id)}">
           <button class="file-item-button" type="button" aria-label="Показать ${escapeHtml(video.file.name)}">
-            <span class="file-badge">MP4</span>
+            <span class="file-badge">${badge}</span>
             <span class="file-text">
               <strong>${escapeHtml(video.file.name)}</strong>
               <span>${escapeHtml(meta)}</span>
@@ -206,10 +732,10 @@ function renderFileList() {
 function renderPreview() {
   const activeVideo = getActiveVideo();
 
-  if (!activeVideo) {
+  if (!activeVideo || !isMp4(activeVideo.file)) {
     previewVideo.removeAttribute("src");
     previewVideo.load();
-    previewCaption.textContent = "";
+    previewCaption.textContent = activeVideo ? `${activeVideo.file.name} будет распакован на сервере` : "";
     return;
   }
 
@@ -238,7 +764,7 @@ function addFiles(fileListLike) {
   let tooLarge = 0;
 
   incomingFiles.forEach((file) => {
-    if (!isMp4(file)) {
+    if (!isProcessableFile(file)) {
       rejected += 1;
       return;
     }
@@ -262,7 +788,7 @@ function addFiles(fileListLike) {
     accepted.push({
       id: createVideoId(file),
       file,
-      objectUrl: URL.createObjectURL(file),
+      objectUrl: isMp4(file) ? URL.createObjectURL(file) : "",
       meta: {
         duration: 0,
         width: 1920,
@@ -276,7 +802,7 @@ function addFiles(fileListLike) {
     const errorText = tooLarge
       ? `Файл слишком большой. Максимальный размер для прототипа: ${formatBytes(MAX_VIDEO_SIZE_BYTES)}.`
       : rejected
-        ? "Нужны файлы в формате MP4."
+        ? "Нужны файлы MP4 или ZIP с MP4."
         : "Эти видео уже добавлены.";
     setError(errorText);
     setNotice(errorText, rejected || tooLarge ? "error" : "warn");
@@ -288,15 +814,15 @@ function addFiles(fileListLike) {
     tooLarge
       ? `Часть файлов не добавлена: размер больше ${formatBytes(MAX_VIDEO_SIZE_BYTES)}.`
       : rejected
-        ? "Часть файлов пропущена: нужен формат MP4."
+        ? "Часть файлов пропущена: нужен формат MP4 или ZIP."
         : "",
   );
   state.videos.push(...accepted);
   state.activeId = state.activeId || accepted[0].id;
   setNotice(
     state.videos.length === 1
-      ? "Видео принято и готово к обработке"
-      : `${pluralizeVideo(state.videos.length)} готовы к пакетной обработке`,
+      ? "Файл принят и готов к обработке"
+      : `${pluralizeUpload(state.videos.length)} готовы к пакетной обработке`,
   );
   render();
 }
@@ -308,7 +834,9 @@ function removeVideo(id) {
   }
 
   const [removed] = state.videos.splice(index, 1);
-  URL.revokeObjectURL(removed.objectUrl);
+  if (removed.objectUrl) {
+    URL.revokeObjectURL(removed.objectUrl);
+  }
 
   if (state.activeId === id) {
     state.activeId = state.videos[index]?.id || state.videos[index - 1]?.id || "";
@@ -318,7 +846,7 @@ function removeVideo(id) {
   if (!state.videos.length) {
     setError("");
   }
-  setNotice(state.videos.length ? `${pluralizeVideo(state.videos.length)} в очереди` : "Видео ожидает загрузки");
+  setNotice(state.videos.length ? `${pluralizeUpload(state.videos.length)} в очереди` : "Видео ожидает загрузки");
   render();
 }
 
@@ -327,7 +855,11 @@ function clearAllVideos() {
     return;
   }
 
-  state.videos.forEach((video) => URL.revokeObjectURL(video.objectUrl));
+  state.videos.forEach((video) => {
+    if (video.objectUrl) {
+      URL.revokeObjectURL(video.objectUrl);
+    }
+  });
   state.videos = [];
   state.activeId = "";
   state.previewCollapsed = false;
@@ -340,12 +872,20 @@ function clearAllVideos() {
   render();
 }
 
-function getDownloadName() {
+function getDownloadBaseName() {
   if (state.videos.length === 1) {
-    return `${sanitizeFileBase(state.videos[0].file.name)}_price_tags.csv`;
+    return `${sanitizeFileBase(state.videos[0].file.name)}_price_tags`;
   }
 
-  return `lenta_price_tags_${state.videos.length}_videos.csv`;
+  return `lenta_price_tags_${state.videos.length}_files`;
+}
+
+function getDownloadName() {
+  return `${getDownloadBaseName()}.csv`;
+}
+
+function getDownloadJsonName() {
+  return `${getDownloadBaseName()}.json`;
 }
 
 function wait(ms) {
@@ -369,6 +909,14 @@ async function readErrorResponse(response) {
   }
   const text = await response.text().catch(() => "");
   return text || `HTTP ${response.status}`;
+}
+
+function userFacingError(error, fallback) {
+  const message = error instanceof Error ? error.message : fallback;
+  if (/failed to fetch|network\s*error|load failed/i.test(message)) {
+    return "Сервер временно недоступен. Обновите страницу и запустите обработку снова.";
+  }
+  return message || fallback;
 }
 
 async function postJson(url, payload = {}) {
@@ -429,12 +977,12 @@ async function createChunkedInferenceJob() {
       const progress = totalBytes > 0 ? Math.min(8, 1 + (uploadedBytes / totalBytes) * 7) : 1;
       setProcessingProgress(
         progress,
-        `Загрузка видео кусками: ${formatBytes(uploadedBytes)} из ${formatBytes(totalBytes)}`,
+        `Загрузка файлов кусками: ${formatBytes(uploadedBytes)} из ${formatBytes(totalBytes)}`,
       );
     }
   }
 
-  setProcessingProgress(8, "Видео загружено, запускаем обработку");
+  setProcessingProgress(8, "Файлы загружены, запускаем обработку");
   return postJson(API_JOB_START_ENDPOINT(jobId), {});
 }
 
@@ -481,7 +1029,7 @@ function renderJobStatus(status) {
 
   processingTitle.textContent = status.current_video
     ? `Обработка: ${status.current_video}`
-    : `Обработка: ${pluralizeVideo(state.videos.length)}`;
+    : `Обработка: ${pluralizeUpload(state.videos.length)}`;
   setProcessingProgress(progress, `${stage}${detail}${videoText}${etaText}`);
 }
 
@@ -517,18 +1065,22 @@ async function runProcessing() {
   runButton.textContent = "Идет распознавание";
   downloadCsv.hidden = true;
   downloadCsv.classList.add("disabled");
+  downloadJson.hidden = true;
+  downloadJson.classList.add("disabled");
   processingPanel.hidden = false;
   processingPanel.classList.remove("is-complete");
   uploadCard.classList.add("is-processing");
   uploadCard.classList.remove("has-result");
-  processingTitle.textContent = `Обработка: ${pluralizeVideo(state.videos.length)}`;
+  processingTitle.textContent = `Обработка: ${pluralizeUpload(state.videos.length)}`;
   progressBar.style.width = "0%";
   setNotice("Видео обрабатывается локальной моделью");
 
   try {
-    setProcessingProgress(1, "Создаем задачу и загружаем видео кусками");
+    setProcessingProgress(1, "Создаем задачу и загружаем файлы кусками");
     const job = await createChunkedInferenceJob();
     const jobId = job.job_id;
+    state.dashboard.selectedJobId = jobId || state.dashboard.selectedJobId;
+    refreshJobsDashboard();
     if (!jobId) {
       throw new Error("Сервер не вернул job_id");
     }
@@ -553,6 +1105,12 @@ async function runProcessing() {
     downloadCsv.hidden = false;
     downloadCsv.classList.remove("disabled");
     downloadCsv.setAttribute("aria-disabled", "false");
+    state.jsonUrl = finalStatus.json_url || API_JOB_JSON_ENDPOINT(jobId);
+    downloadJson.href = state.jsonUrl;
+    downloadJson.download = getDownloadJsonName();
+    downloadJson.hidden = false;
+    downloadJson.classList.remove("disabled");
+    downloadJson.setAttribute("aria-disabled", "false");
     if (finalStatus.review_html_url) {
       downloadReview.href = finalStatus.review_html_url;
       downloadReview.hidden = false;
@@ -566,15 +1124,16 @@ async function runProcessing() {
       downloadReviewZip.setAttribute("aria-disabled", "false");
     }
     setProcessingProgress(100, `${Number.isFinite(rows) && rows > 0 ? rows : "CSV"} строк готово, job ${jobId}`);
-    processingTitle.textContent = "CSV готов";
+    processingTitle.textContent = "CSV и JSON готовы";
     processingPanel.classList.add("is-complete");
     uploadCard.classList.remove("is-processing");
     uploadCard.classList.add("has-result");
-    setNotice("CSV готов к скачиванию", "success");
+    refreshJobsDashboard();
+    setNotice("CSV и JSON готовы к скачиванию", "success");
     runButton.textContent = "Запустить заново";
     runButton.disabled = false;
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Не удалось запустить инференс";
+    const message = userFacingError(error, "Не удалось запустить инференс");
     setError(message);
     setNotice("Инференс завершился с ошибкой", "error");
     processingTitle.textContent = "Ошибка обработки";
@@ -584,12 +1143,13 @@ async function runProcessing() {
     runButton.disabled = false;
   } finally {
     state.isProcessing = false;
+    refreshJobsDashboard();
   }
 }
 
 function openVideoModal() {
   const activeVideo = getActiveVideo();
-  if (!activeVideo) {
+  if (!activeVideo || !isMp4(activeVideo.file)) {
     return;
   }
 
@@ -666,6 +1226,18 @@ fileList.addEventListener("click", (event) => {
   }
 });
 
+jobList.addEventListener("click", (event) => {
+  const row = event.target.closest(".job-row-main");
+  if (!row) {
+    return;
+  }
+  state.dashboard.selectedJobId = row.dataset.jobId || "";
+  jobList.querySelectorAll(".job-row").forEach((item) => {
+    item.classList.toggle("is-selected", item.dataset.jobId === state.dashboard.selectedJobId);
+  });
+  refreshSelectedJobMetrics();
+});
+
 clearFiles.addEventListener("click", clearAllVideos);
 runButton.addEventListener("click", runProcessing);
 openPreview.addEventListener("click", openVideoModal);
@@ -697,9 +1269,20 @@ previewVideo.addEventListener("loadedmetadata", () => {
   renderFileList();
 });
 
+refreshSystemMetrics();
+refreshJobsDashboard();
+state.dashboard.systemTimer = window.setInterval(refreshSystemMetrics, DASHBOARD_SYSTEM_INTERVAL_MS);
+state.dashboard.jobsTimer = window.setInterval(refreshJobsDashboard, DASHBOARD_JOBS_INTERVAL_MS);
+
 window.addEventListener("beforeunload", () => {
-  state.videos.forEach((video) => URL.revokeObjectURL(video.objectUrl));
+  state.videos.forEach((video) => {
+    if (video.objectUrl) {
+      URL.revokeObjectURL(video.objectUrl);
+    }
+  });
   if (state.csvUrl) {
     URL.revokeObjectURL(state.csvUrl);
   }
+  window.clearInterval(state.dashboard.systemTimer);
+  window.clearInterval(state.dashboard.jobsTimer);
 });

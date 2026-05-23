@@ -328,7 +328,7 @@ def find_duplicates(
 
 
 def default_tracking_csv(run_dir: Path) -> Path:
-    return run_dir.parent / "quality_43_15" / "tracking" / "best_per_track.csv"
+    return run_dir.parent / "base" / "tracking" / "best_per_track.csv"
 
 
 def main() -> None:

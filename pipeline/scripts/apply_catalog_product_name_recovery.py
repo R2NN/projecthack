@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import math
+import os
 import pickle
 import re
 import shutil
@@ -515,6 +516,36 @@ def trailing_unit_display(value: str) -> str:
     return catalog_weight_display(match.group(0)) if match else ""
 
 
+def country_parenthetical_spans(value: str) -> list[tuple[int, int, str]]:
+    spans: list[tuple[int, int, str]] = []
+    for match in re.finditer(r"\(([^)]{3,32})\)", value):
+        country = visible_country(match.group(0))
+        if country:
+            spans.append((match.start(), match.end(), country))
+    return spans
+
+
+def clean_tail_after_country_removal(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    cleaned = re.sub(r"\s+([,.;:])", r"\1", cleaned)
+    cleaned = re.sub(r"(?:\s|^)[,.;:|/\\-]*(?:[0oо]\.?)\s*$", "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned.strip(" ,;:-")
+
+
+def remove_country_parentheticals(value: str) -> tuple[str, str]:
+    spans = country_parenthetical_spans(value)
+    if not spans:
+        return value, ""
+    country = spans[-1][2]
+    pieces: list[str] = []
+    last_end = 0
+    for start, end, _ in spans:
+        pieces.append(value[last_end:start])
+        last_end = end
+    pieces.append(value[last_end:])
+    return clean_tail_after_country_removal("".join(pieces)), country
+
+
 def split_tail(value: str) -> tuple[str, str, str]:
     base = surface_text(value)
     unit = trailing_unit_display(base)
@@ -525,13 +556,7 @@ def split_tail(value: str) -> tuple[str, str, str]:
             base,
             flags=re.IGNORECASE,
         ).strip()
-    country = ""
-    country_match = re.search(r"\(([^)]{3,32})\)\s*$", base)
-    if country_match:
-        candidate = visible_country(country_match.group(0))
-        if candidate:
-            country = candidate
-            base = base[: country_match.start()].strip()
+    base, country = remove_country_parentheticals(base)
     return base, country, unit
 
 
@@ -1538,18 +1563,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-run-dir",
         type=Path,
-        default=Path("repro_outputs/quality_43_15_tesseract_crop_quality_weighted_w005"),
+        default=Path("../runtime/runs/tesseract_crop_quality_weighted_w005"),
     )
     parser.add_argument(
         "--output-run-dir",
         type=Path,
-        default=Path("repro_outputs/quality_43_15_tesseract_catalog_recovery_v1"),
+        default=Path("../runtime/runs/tesseract_catalog_recovery"),
     )
     parser.add_argument("--catalog-json", type=Path, default=Path("data/lenta_all_products_prices_weight.json"))
     parser.add_argument(
         "--catalog-cache",
         type=Path,
-        default=Path("repro_outputs/cache/lenta_catalog_product_name_index_v3.pkl"),
+        default=Path(os.environ.get("LENTA_CATALOG_CACHE", os.environ.get("CATALOG_CACHE_PATH", "../runtime/cache/lenta_catalog_product_name_index_v3.pkl"))),
     )
     parser.add_argument("--rebuild-catalog-cache", action="store_true")
     parser.add_argument("--disable-catalog-cache", action="store_true")

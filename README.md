@@ -1,412 +1,217 @@
-# Shelf Vision: распознавание ценников по видео полки
+# Lenta Shelf Vision
 
-Shelf Vision принимает MP4-видео прохода робота вдоль стеллажа и возвращает CSV в формате `sample.csv`: название товара, цены, скидки, barcode/sku, координаты ценника, QR-поля и служебные признаки. Решение рассчитано на поток видео из разных магазинов: результаты сохраняются в SQLite, crops для проверки уходят в отдельный HTML/ZIP-отчёт, а неуверенные предсказания складываются для последующего дообучения.
-
-Если при проверке или запуске возникнут проблемы, напишите в Telegram: [@rktqq](https://t.me/rktqq). Быстро поможем с окружением, артефактами или демо-стендом.
-
-Демо-стенд:
-
-https://adapters-flower-tray-makes.trycloudflare.com
-
-Ссылка работает через Cloudflare quick tunnel и может меняться при выключении компьютера, перезапуске или сбое туннеля. Если ссылка не открывается, настоятельно прошу написать в Telegram: [@rktqq](https://t.me/rktqq).
-
-Health check:
-
-https://adapters-flower-tray-makes.trycloudflare.com/api/health
-
-## Коротко
-
-- Полный цикл: загрузка видео, детекция ценников, OCR, восстановление по `db_hack`, sanity-check цен, дедупликация, CSV.
-- Инференс локальный: модель, OCR и каталог работают без внешних API.
-- Результаты сохраняются не только в браузере: CSV, SQLite, manifest, HTML/ZIP-отчёт по crops, uncertain-хранилище.
-- Загрузка больших MP4 идёт по частям: браузер отправляет файл блоками, а сервер запускает обработку после полной сборки файла.
-- Архитектура готова к горизонтальному масштабированию: видео, кадры и crops можно распределять между workers.
-- Для воспроизведения приложен `artifacts_for_judges.zip`: в нём уже лежат каталог и checkpoint в нужной структуре.
-- Добавлен worker-ready режим: web/API может только ставить задачи в очередь, а независимые workers забирают их без изменения ML-логики.
-
-## Что важно для проверки
-
-- **Качество распознавания**: pipeline не ограничивается OCR как есть. После детекции идут tracking, выбор лучшего crop, несколько OCR-веток, сверка с точным каталогом `db_hack`, проверка ценовых аномалий и дедупликация повторов.
-- **Соответствие формату**: результат экспортируется в CSV со схемой `sample.csv`, включая товарные поля, цены, скидки, barcode, QR-поля, координаты и служебные признаки.
-- **Воспроизводимость**: в репозитории есть Dockerfile, `docker-compose.yml`, проверка артефактов, README-инструкция и архив `artifacts_for_judges.zip` для полного запуска.
-- **Архитектура**: web/API, detector, OCR, catalog recovery, postprocess, хранилище результатов и review-отчёты разделены на понятные этапы.
-- **Масштабирование**: обработка естественно раскладывается по видео, кадрам и crops; добавлен выключенный по умолчанию worker-ready слой с очередью, heartbeat, retry и lease-lock, поэтому workers можно подключать без переписывания pipeline.
-- **Демонстрация**: есть живой web-стенд, загрузка MP4 через браузер, прогресс обработки, скачивание CSV и отдельный HTML/ZIP-отчёт для проверки сложных случаев.
-
-
-## Архитектура
-
-```mermaid
-flowchart TD
-    A[MP4 видео робота] --> B[Web API]
-    B --> C[Chunk upload storage]
-    C --> D{Execution mode}
-    D -->|local demo| E[Local inference thread]
-    D -->|worker-ready| W[SQLite queue / future MQ]
-    W --> X[GPU/CPU workers]
-    E --> Y[RF-DETR detector]
-    X --> Y
-    Y --> F[Tracking ценников]
-    F --> G[Crop quality selection]
-    G --> H[OCR zones]
-    H --> I[Numeric OCR]
-    H --> J[Product-name OCR]
-    I --> K[QR / barcode / price parser]
-    J --> L[Catalog recovery по db_hack]
-    K --> M[Price sanity]
-    L --> M
-    M --> N[Dedup]
-    N --> O[CSV sample submit]
-    N --> P[SQLite]
-    N --> Q[HTML review report]
-    N --> R[Uncertain storage]
-```
-
-Основные компоненты:
-
-- `web/` — UI, API, очередь задач, progress/ETA, SQLite writer, metrics endpoint.
-- `pipeline/` — inference/training scripts: детекция, OCR, catalog recovery, postprocess.
-- `artifacts/` — внешние артефакты: `db_hack.csv`, веса моделей, закрытые данные.
-- `runtime/` — локальные результаты: jobs, CSV, logs, crops, SQLite, HTML-отчёты.
-
-## OCR-стратегия
-
-Мы не используем один универсальный OCR для всех полей. У ценника разные зоны имеют разную визуальную природу, поэтому pipeline использует разные инструменты под разные категории:
-
-- **RF-DETR**: детектирует сам ценник на кадре.
-- **OpenCV preprocessing**: нормализация crops, зоны, бинаризация, геометрия и фильтры качества.
-- **RapidOCR**: быстрый OCR для числовых и коротких полей: обычная цена, barcode digits, sku/id, дата печати, служебные коды.
-- **EasyOCR**: дополнительный OCR для сложных ценовых зон, прежде всего цена по карте и скидочные поля.
-- **Tesseract rus+eng**: product-name fast path, где важны длинные строки на русском и английском.
-- **PaddleOCR**: альтернативный/расширяемый путь для product-name и additional_info, оставлен в scripts для дальнейшего улучшения.
-- **Catalog recovery**: финальная сверка с `db_hack`, чтобы OCR-шум не превращался в произвольное название товара.
-
-Такой подход устойчивее, чем “один OCR на всё”: цена, barcode и название товара требуют разных preprocessing, разных confidence-порогов и разной логики восстановления.
-
-## Быстрый запуск UI
-
-```bash
-git clone https://github.com/R2NN/projecthack.git
-cd projecthack
-docker compose up --build
-```
-
-Открыть:
-
-```text
-http://localhost:5173
-```
-
-Без внешних артефактов поднимется web-интерфейс и API, а `/api/health` покажет, каких файлов не хватает для полного инференса.
-
-## Полный запуск инференса в Docker
-
-1. Скачайте `artifacts_for_judges.zip` из корня репозитория.
-2. Распакуйте архив в корень проекта.
-3. Проверьте, что появилась структура:
-
-```text
-artifacts/
-  db_hack.csv
-  models/
-    rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth
-```
-
-Архив хранится через Git LFS, поэтому при обычном `git clone` нужен установленный Git LFS. Если LFS не установлен, файл можно скачать с GitHub через браузер.
-
-Проверка:
-
-```bash
-python tools/check_artifacts.py
-```
-
-Запуск:
-
-```bash
-INSTALL_PIPELINE_DEPS=true docker compose up --build
-```
-
-В PowerShell:
-
-```powershell
-$env:INSTALL_PIPELINE_DEPS="true"
-docker compose up --build
-```
-
-Контейнер использует Python 3.12, изолированное окружение `/opt/venv` для Python-зависимостей pipeline и Linux-пути к системным бинарям:
-
-```text
-LENTA_PIPELINE_PYTHON=/opt/venv/bin/python
-LENTA_TESSERACT_EXE=/usr/bin/tesseract
-LENTA_TESSDATA_DIR=/usr/share/tesseract-ocr/5/tessdata
-```
-
-Если нужно отдельно собрать образ с Python-зависимостями pipeline:
-
-```bash
-docker build --build-arg INSTALL_PIPELINE_DEPS=true -t shelf-vision-full .
-```
-
-Для GPU в Docker нужен NVIDIA Container Toolkit и совместимые драйверы. В промышленном контуре web/API и GPU workers стоит запускать отдельными сервисами: web остаётся лёгким входным контуром, а обработчики масштабируются независимо.
-
-## Артефакты модели и каталога
-
-Веса и каталог не лежат в обычной Git-истории как большие бинарные blob-файлы. Они приложены отдельным LFS-архивом:
-
-```text
-artifacts_for_judges.zip
-```
-
-Внутри архива:
-
-```text
-artifacts/
-  db_hack.csv
-  models/
-    rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth
-```
-
-Почему так:
-
-- checkpoint весит около 121 МБ;
-- модель является производным артефактом обучения;
-- архив даёт воспроизводимость без ручной передачи файлов;
-- Git LFS не раздувает обычную историю исходного кода;
-- checkpoint можно заменить новым архивом без переписывания структуры проекта.
-
-## Локальный Windows-запуск
-
-```powershell
-cd web
-$env:LENTA_PIPELINE_ROOT="A:\lenta_pipeline\handoff_v19_speed_full_pipeline_20260518_040946"
-$env:LENTA_CATALOG_PATH="A:\lenta_data\db_hack.csv"
-$env:LENTA_DETECTOR_CHECKPOINT="A:\lenta_pipeline\handoff_v19_speed_full_pipeline_20260518_040946\models\rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth"
-$env:LENTA_WEB_RUNTIME_ROOT="A:\lenta_web_runtime"
-python server.py --host 127.0.0.1 --port 5173
-```
-
-Публичный стенд через Cloudflare Tunnel:
-
-```powershell
-cd web
-.\start_public_site.ps1 -Restart
-```
-
-## Результаты и отчёты
-
-После обработки создаются:
-
-- `combined_submission.csv` — итоговая выгрузка;
-- `manifest.json` — служебная информация по job;
-- `review/review_manifest.json` — данные crops для проверки;
-- `review/review_report.html` — HTML-отчёт по crops, открывается отдельной ссылкой после обработки;
-- `review/review_package.zip` — автономный пакет с HTML-отчётом, manifest и изображениями crops;
-- `uncertain_predictions/<job_id>/` — неуверенные предсказания для ревью и будущего обучения;
-- `lenta_results.sqlite` — база с jobs, строками CSV, review items и агрегатами.
-
-На главном экране crops не показываются сеткой, чтобы интерфейс оставался чистым. Для проверки сложных случаев есть отдельный HTML-отчёт и записи в SQLite.
-
-## Метрики
-
-API:
-
-```text
-GET /api/metrics
-```
-
-Уже считаются:
-
-- количество jobs, успешных и упавших задач;
-- количество видео и строк ценников;
-- fill-rate по `barcode`, `product_name`, `price_card`, `price_default`;
-- число скидочных строк;
-- средние цены;
-- подозрительные случаи, где цена по карте выше обычной;
-- количество crops для review;
-- количество uncertain predictions;
-- топ видео по числу найденных ценников.
-
-Для сети магазинов эти метрики расширяются до:
-
-- качества распознавания по магазину, дате, камере и маршруту;
-- доли товаров без barcode или с низкой уверенностью;
-- списка магазинов с большим числом ценовых аномалий;
-- товаров, которые часто не матчятся с каталогом;
-- SLA обработки: очередь, время на видео, throughput, ошибки workers;
-- контроля промо: скидочные ценники, расхождения цены карты и QR;
-- контроля выкладки относительно планограммы или expected assortment.
-
-## Worker-ready режим
-
-Это отдельная часть решения про промышленную эксплуатацию. В демо можно обработать одно видео на одном компьютере, но в реальной сети магазинов поток будет другим: много магазинов, много роботов, длинные видео, пики нагрузки ночью или после переоценки. Если всё завязано на один процесс, очередь быстро растёт, а любой сбой останавливает обработку.
-
-Поэтому в проект добавлен worker-ready слой. Он не включает “100 workers” на демо-стенде, но заранее отделяет приём видео от обработки. Web/API принимает файл и создаёт задачу, а независимые обработчики забирают задачи из очереди. Так можно добавлять мощности без переписывания распознавания.
-
-Текущий публичный стенд по умолчанию работает в `local` режиме, чтобы сохранить стабильность демонстрации. Worker-режим включается отдельно и использует тот же inference pipeline.
-
-Что уже реализовано:
-
-- `web/server.py` принимает видео, сохраняет upload chunks и либо запускает локальный inference, либо кладёт задачу в очередь;
-- `worker_tasks` в SQLite работает как локальный backend очереди для демонстрации контракта;
-- atomic claim через `BEGIN IMMEDIATE` и lease-lock защищает от ситуации, когда два worker берут один job;
-- `attempts` и `max_attempts` дают retry после временных ошибок;
-- `worker_heartbeats` хранит живые обработчики, host, pid и время последнего сигнала;
-- `web/worker.py` забирает задачу и запускает тот же самый inference pipeline без изменения ML-кода;
-- `GET /api/queue` показывает состояние очереди, recent tasks и активные workers.
-
-Почему это важно:
-
-- можно масштабировать обработку горизонтально: добавить ещё контейнеры `shelf-worker`, когда видео стало больше;
-- можно разделить роли машин: GPU workers занимаются детекцией, CPU/OCR workers занимаются распознаванием и postprocess;
-- можно переживать временные сбои: задача не теряется, а возвращается в очередь после lease/retry;
-- можно мониторить промышленный контур: видно, сколько задач ждёт, какие workers живы, где возникли ошибки;
-- можно внедрять это в инфраструктуру компании постепенно: локальная SQLite-очередь заменяется на промышленную очередь, а ML-pipeline остаётся прежним.
-
-Важно для качества: worker-ready режим не меняет ML-логику и не влияет на точность. Детекция, OCR, catalog recovery, price sanity и dedup остаются теми же. Меняется только способ доставки задачи до обработчика.
-
-### Как это подключается к промышленному контуру
-
-Локальная SQLite-очередь нужна для воспроизводимой проверки на одном компьютере. В инфраструктуре сети магазинов меняется только backend очереди и storage:
-
-```text
-Web/API
-  -> очередь задач: SQLite сейчас, RabbitMQ/Kafka/SQS в промышленном контуре
-  -> object storage: runtime сейчас, S3/MinIO в промышленном контуре
-  -> GPU workers: RF-DETR detection
-  -> CPU/OCR workers: OCR, parsing, postprocess
-  -> reducer: merge, tracking/dedup, catalog recovery, CSV, metrics
-  -> DB/BI: SQLite сейчас, PostgreSQL/ClickHouse в промышленном контуре
-```
-
-Такой контракт позволяет добавлять обработчики горизонтально: один worker может обрабатывать одно видео или батч crops, а общий reducer собирает результат в тот же формат `sample.csv`. При росте нагрузки добавляются новые контейнеры `shelf-worker`, при падении worker задача возвращается в очередь после истечения lease или retry.
-
-### Запуск worker-режима
-
-Локальный запуск с workers:
-
-```bash
-LENTA_JOB_EXECUTION_MODE=queue docker compose --profile workers up --build --scale shelf-worker=2
-```
-
-В PowerShell:
-
-```powershell
-$env:LENTA_JOB_EXECUTION_MODE="queue"
-docker compose --profile workers up --build --scale shelf-worker=2
-```
-
-Проверка очереди без тяжёлого inference:
-
-```bash
-python tools/test_worker_queue.py
-```
-
-Этот тест проверяет claim задач, отсутствие двойной выдачи одной задачи, retry и финальный статус. Он не запускает ML-инференс и не влияет на качество модели.
-
-## Почему решение масштабируется
-
-Pipeline естественно раскладывается на map-reduce:
-
-```text
-map workers:
-  видео / кадры / crops
-  -> detection
-  -> OCR
-  -> field candidates
-
-reduce stage:
-  candidates
-  -> tracking merge
-  -> catalog recovery
-  -> price sanity
-  -> dedup
-  -> CSV + metrics
-```
-
-При росте нагрузки можно добавить новые workers:
-
-- GPU workers для RF-DETR detection;
-- CPU/OCR workers для OCR и postprocess;
-- отдельный reducer для merge/dedup/export;
-- общий object storage для видео, crops и результатов;
-- PostgreSQL/ClickHouse вместо локального SQLite.
-
-Это важно для крупного бизнеса: система не привязана к одному компьютеру и не требует ручной обработки каждого видео.
-
-## Ресурсы
-
-Минимально для UI/API:
-
-- 2 vCPU — два виртуальных CPU-потока, не два физических процессора;
-- 2-4 GB RAM;
-- 5 GB disk под runtime;
-- Docker или Python 3.11+.
-
-Для полного локального инференса:
-
-- GPU с 6 GB VRAM может быть достаточен для RF-DETR small на текущих настройках;
-- 8 GB VRAM — рекомендуемый минимум с запасом для стабильной работы;
-- 16 GB RAM;
-- 20-30 GB disk под модели, runtime и crops;
-- для Docker-сборки с `INSTALL_PIPELINE_DEPS=true` нужно 25-35 GB свободного места в Docker storage, потому что GPU-зависимости включают Torch/CUDA wheels;
-- Python 3.12 окружение с RF-DETR/OCR-зависимостями;
-- Tesseract + русский language pack;
-- `db_hack.csv` и checkpoint детектора.
-
-CPU-only режим технически возможен для части pipeline, но для демонстрации и массовой обработки он слишком медленный. Практичный вариант — GPU для detection и CPU/OCR workers для остального.
-
-## Лицензии и чистота поставки
-
-Репозиторий очищен от лишних тяжёлых и потенциально закрытых файлов. В обычную Git-историю не включены:
-
-- видео с полок;
-- обучающие датасеты;
-- отдельные веса моделей (`.pth`, `.pt`, `.ckpt`, `.onnx`) вне LFS-архива;
-- PDF/PPTX материалы хакатона;
-- runtime-логи, SQLite, crops, uncertain-хранилище;
-- брендовые ассеты заказчика.
-
-В репозитории лежат:
-
-- исходный код web/API;
-- исходники pipeline;
-- `sample.csv` только как header-схема итоговой выгрузки;
-- Docker/compose/инструкции;
-- скрипты проверки окружения.
-- `artifacts_for_judges.zip` через Git LFS для воспроизведения проверки.
-
-Почему это важно:
-
-- рабочие видео, логи и промежуточные crops не попадают в публичную историю Git;
-- веса модели упакованы отдельно и могут быть заменены новым checkpoint без изменения кода;
-- third-party библиотеки не vendored в проект, а устанавливаются через package managers;
-- зависимости можно проверить по `pipeline/requirements-gpu.txt`;
-- поставка воспроизводима: код, Docker-инструкция и нужные артефакты находятся по одной ссылке.
-
+Минимальный воспроизводимый проект для распознавания ценников на видео: RF-DETR детектирует ценники, OCR извлекает цены и названия, `db_hack.csv` помогает восстановить карточки товара, QR-priority постобработка перезаписывает поля ценника данными из валидного QR, а web/API дает загрузку видео и скачивание CSV/JSON.
 
 ## Структура
 
 ```text
 .
-├── web/                 # UI, API, jobs, metrics, SQLite writer, worker process
-├── pipeline/            # inference/training pipeline без весов и датасетов
-├── artifacts/           # локальные внешние артефакты, не коммитятся
-├── tools/               # проверки окружения
-├── artifacts_for_judges.zip
-├── Dockerfile
-├── docker-compose.yml
-└── README.md
+  README.md
+  Dockerfile
+  docker-compose.yml
+  .env.example
+  configs/default.yaml
+  artifacts/
+    models/
+    data/
+    special_symbol_templates/
+    training_data/
+  pipeline/
+    run_inference.ps1
+    run_train_rfdetr.ps1
+    requirements.txt
+    scripts/
+  web/
+    server.py
+    index.html
+    app.js
+    styles.css
+  tools/
+    doctor.py
+    check_artifacts.py
+  runtime/
 ```
 
-## Проверки
+В проект не перенесены старые R&D jobs/runs/crops, debug HTML, review-файлы, временные архивы и альтернативные варианты запуска. Основной путь эксплуатации: Docker Compose.
 
-```bash
-python -m py_compile web/server.py web/worker.py web/worker_queue.py tools/test_worker_queue.py
-python tools/test_worker_queue.py
-node --check web/app.js
-python -m compileall pipeline/scripts
-python tools/check_artifacts.py
-docker compose config
+## Артефакты
+
+В GitHub крупные runtime-файлы (`checkpoint`, `db_hack.csv` и пример видео) хранятся через Git LFS. После `git clone` выполните `git lfs pull`; при распространении исходников без LFS-файлов положите вручную:
+
+```text
+artifacts/models/rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth
+artifacts/data/db_hack.csv
+artifacts/data/sample.csv
+artifacts/special_symbol_templates/full_tags/
 ```
 
-`check_artifacts.py` завершится ошибкой на чистом clone, если `artifacts_for_judges.zip` ещё не распакован в `artifacts/`. Это ожидаемо.
+Проверка:
+
+```powershell
+python .\tools\doctor.py
+```
+
+## One-Command Appliance
+
+Запуск CPU/auto-режима:
+
+```powershell
+docker compose up --build
+```
+
+По умолчанию Dockerfile ставит `pipeline/requirements-appliance.txt`: это lean runtime-набор без CUDA wheel’ов. Полный `pipeline/requirements.txt` оставлен для разработки и воспроизведения исходной ML-среды, но он слишком тяжелый для дефолтного one-command запуска.
+
+Во время Docker build образ заранее загружает модели EasyOCR в `/opt/easyocr`, чтобы job не пытался скачивать OCR-веса уже во время инференса. Для первой сборки все равно нужен интернет: Docker скачивает base image, Python-пакеты и OCR-веса.
+
+После старта:
+
+```text
+Web UI:    http://127.0.0.1:8000/
+Health:    http://127.0.0.1:8000/api/health
+Ready:     http://127.0.0.1:8000/api/ready
+Runtime:   ./runtime/jobs/
+```
+
+Compose подключает:
+
+```text
+./artifacts -> /app/artifacts:ro
+./runtime   -> /data/runtime
+```
+
+Если модели, каталога, Tesseract или OCR stack не хватает, сервис не должен падать traceback'ом в UI: `/api/health` остается живым, а `/api/ready` и `tools/doctor.py` возвращают понятные коды вроде `MODEL_NOT_FOUND`, `CATALOG_NOT_FOUND`, `TESSERACT_NOT_READY`, `OCR_STACK_NOT_READY`.
+
+GPU-профиль для NVIDIA:
+
+```powershell
+docker compose --profile gpu up --build shelf-vision-gpu
+```
+
+GPU-сервис по умолчанию доступен на `http://127.0.0.1:8001/`, чтобы не конфликтовать с CPU-сервисом. Нужны NVIDIA driver и NVIDIA Container Toolkit. Для GPU compose использует отдельный `Dockerfile.gpu` на базе `pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime`: CUDA/PyTorch приходят из базового образа, а `pipeline/requirements-appliance-gpu.txt` ставит только дополнительные OCR/web зависимости. Это переносимый NVIDIA CUDA-профиль, а не привязка к конкретной модели видеокарты; AMD/Intel GPU требуют отдельного ROCm/DirectML-варианта и этим compose-профилем не покрываются. CPU fallback включается через `INFERENCE_DEVICE=auto` или `INFERENCE_DEVICE=cpu`; он может быть существенно медленнее и зависит от поддержки CPU в установленном ML stack.
+
+Проверить, видит ли Docker GPU:
+
+```powershell
+docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi
+```
+
+## Переменные
+
+Скопируйте `.env.example` в `.env`, если нужно изменить порты, runtime или volume:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Главные настройки:
+
+```text
+APP_PORT=8000
+RUNTIME_DIR=/data/runtime
+MODEL_PATH=/app/artifacts/models/rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth
+CATALOG_PATH=/app/artifacts/data/db_hack.csv
+SAVE_INPUT_VIDEO=false
+SAVE_REVIEW_CROPS=true
+WORKER_MODE=local
+INFERENCE_DEVICE=auto
+```
+
+Проект не зависит от конкретного диска. На Windows тяжелые директории можно вынести на другой диск через `HOST_RUNTIME_DIR` или `RUNTIME_DIR`, без правки кода.
+
+## API
+
+Стабильный appliance API:
+
+```text
+GET  /api/v1/health
+POST /api/v1/jobs
+GET  /api/v1/jobs/<job_id>
+GET  /api/v1/jobs/<job_id>/result.csv
+GET  /api/v1/jobs/<job_id>/metrics.json
+GET  /api/v1/jobs/<job_id>/review.html
+```
+
+Пример:
+
+```powershell
+curl.exe -F "videos=@.\examples\26_12-20.mp4;type=video/mp4" http://127.0.0.1:8000/api/v1/jobs
+curl.exe http://127.0.0.1:8000/api/v1/jobs/<job_id>
+curl.exe -o final_submission.csv http://127.0.0.1:8000/api/v1/jobs/<job_id>/result.csv
+```
+
+Старые web endpoints сохранены для UI:
+
+```text
+POST /api/infer
+GET  /api/jobs/<job_id>/status
+GET  /api/jobs/<job_id>/csv
+GET  /api/jobs/<job_id>/json
+GET  /api/system/metrics
+GET  /api/jobs/summary
+GET  /api/jobs/<job_id>/metrics
+```
+
+## Runtime Layout
+
+Каждый запуск сохраняется в:
+
+```text
+runtime/jobs/<job_id>/
+  input_meta.json
+  state.json
+  final_submission.csv
+  final_submission.json
+  metrics.json
+  pipeline_manifest.json
+  review.html
+  crops/
+  logs/
+```
+
+`pipeline_manifest.json` фиксирует `pipeline_version`, пути и SHA256 модели, каталога и входного видео, а также статусы и время этапов.
+
+## Monitoring Dashboard
+
+Web UI содержит встроенный раздел мониторинга без обязательных Prometheus/Grafana:
+
+- System: CPU, RAM, GPU/VRAM, свободное место runtime-диска, workers/OCR jobs.
+- Queue / Jobs: queued/running/done/failed, среднее время и последние jobs.
+- Current Job: текущий этап, прогресс и оценка "до конца осталось".
+- Pipeline Timing: breakdown времени по этапам из `timings.csv`.
+- Result Quality: rows, fill-rate по `product_name`, `price_card`, `price_default`, `barcode`, `discount_amount`, suspicious rows и статусы CSV/JSON/review/debug/crops.
+
+В production эти же данные можно экспортировать во внешнюю систему мониторинга, но для демо они доступны прямо в web UI.
+
+## Инференс Без Сайта
+
+Локальный запуск остается доступен, если установлены Python-зависимости, PowerShell и Tesseract:
+
+```powershell
+.\pipeline\run_inference.ps1 `
+  -VideoPath .\examples\26_12-20.mp4 `
+  -VideoId 26_12-20 `
+  -Device auto
+```
+
+Основные outputs:
+
+```text
+runtime/runs/<run>/final_submission.csv
+runtime/runs/<run>/timings.csv
+runtime/runs/<run>/qr_priority/summary.json
+runtime/runs/<run>/qr_priority/qr_priority_debug.html
+```
+
+## Обучение
+
+Один основной сценарий:
+
+```powershell
+.\pipeline\run_train_rfdetr.ps1
+```
+
+Обучающие видео и разметка не входят в минимальный пакет. Для воспроизводимого обучения положите annotated training data в `artifacts/training_data` или передайте `-DataRoot`; итоговый checkpoint должен попасть в `artifacts/models/`.
+
+## Ограничения
+
+Первый Docker build может быть долгим: ML/OCR зависимости и Torch тяжелые даже в lean-варианте. GPU build скачивает крупный PyTorch CUDA base image и требует заметно больше свободного места в Docker Desktop/WSL, но не собирает CUDA через pip. Для полного inference нужны модель, `db_hack.csv`, `sample.csv`, templates, Tesseract rus+eng и достаточно места в runtime. CPU-режим предназначен как fallback и может быть слишком медленным для больших видео.

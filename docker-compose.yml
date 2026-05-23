@@ -3,29 +3,94 @@ services:
     build:
       context: .
       args:
-        INSTALL_PIPELINE_DEPS: ${INSTALL_PIPELINE_DEPS:-false}
+        INSTALL_PIPELINE_DEPS: ${INSTALL_PIPELINE_DEPS:-true}
+        PIPELINE_REQUIREMENTS: ${PIPELINE_REQUIREMENTS:-/app/pipeline/requirements-appliance.txt}
     environment:
-      LENTA_JOB_EXECUTION_MODE: ${LENTA_JOB_EXECUTION_MODE:-local}
+      APP_HOST: ${APP_HOST:-0.0.0.0}
+      APP_PORT: ${APP_PORT:-8000}
+      ARTIFACTS_DIR: /app/artifacts
+      RUNTIME_DIR: /data/runtime
+      EASYOCR_MODULE_PATH: ${EASYOCR_MODULE_PATH:-/opt/easyocr}
+      MODEL_PATH: ${MODEL_PATH:-/app/artifacts/models/rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth}
+      CATALOG_PATH: ${CATALOG_PATH:-/app/artifacts/data/db_hack.csv}
+      SAMPLE_CSV: ${SAMPLE_CSV:-/app/artifacts/data/sample.csv}
+      SPECIAL_SYMBOL_TEMPLATE_DIR: ${SPECIAL_SYMBOL_TEMPLATE_DIR:-/app/artifacts/special_symbol_templates/full_tags}
+      SAVE_INPUT_VIDEO: ${SAVE_INPUT_VIDEO:-false}
+      SAVE_REVIEW_CROPS: ${SAVE_REVIEW_CROPS:-true}
+      CATALOG_MODE: ${CATALOG_MODE:-assist}
+      WORKER_MODE: ${WORKER_MODE:-local}
+      INFERENCE_DEVICE: ${INFERENCE_DEVICE:-auto}
+      MIN_FREE_GB: ${MIN_FREE_GB:-5}
+      LENTA_PIPELINE_ROOT: /app/pipeline
+      LENTA_PIPELINE_SCRIPT: /app/pipeline/run_inference.ps1
+      LENTA_POWERSHELL: pwsh
+      LENTA_PIPELINE_PYTHON: /opt/venv/bin/python
+      LENTA_TESSERACT_EXE: /usr/bin/tesseract
+      LENTA_TESSDATA_DIR: /usr/share/tesseract-ocr/5/tessdata
+      LENTA_RESULTS_DB: /data/runtime/lenta_results.sqlite
+      LENTA_WORKER_QUEUE_DB: /data/runtime/worker_queue.sqlite
+      LENTA_RETRAIN_CONFIG: /data/runtime/retrain_config.json
+      LENTA_UNCERTAIN_ROOT: /data/runtime/uncertain_predictions
     ports:
-      - "5173:5173"
-    env_file:
-      - .env.example
+      - "${APP_PORT:-8000}:${APP_PORT:-8000}"
     volumes:
-      - ./runtime:/runtime
-      - ./artifacts:/artifacts:ro
+      - ${HOST_ARTIFACTS_DIR:-./artifacts}:/app/artifacts:ro
+      - ${HOST_RUNTIME_DIR:-./runtime}:/data/runtime
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${APP_PORT:-8000}/api/ready >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
     restart: unless-stopped
 
-  shelf-worker:
-    profiles:
-      - workers
+  shelf-vision-gpu:
+    profiles: ["gpu"]
     build:
       context: .
+      dockerfile: Dockerfile.gpu
       args:
-        INSTALL_PIPELINE_DEPS: ${INSTALL_PIPELINE_DEPS:-false}
-    command: ["python", "/app/web/worker.py", "--poll-seconds", "2"]
-    env_file:
-      - .env.example
+        INSTALL_PIPELINE_DEPS: ${INSTALL_PIPELINE_DEPS:-true}
+        PIPELINE_REQUIREMENTS: ${GPU_PIPELINE_REQUIREMENTS:-/app/pipeline/requirements-appliance-gpu.txt}
+        GPU_BASE_IMAGE: ${GPU_BASE_IMAGE:-pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime}
+    environment:
+      APP_HOST: ${APP_HOST:-0.0.0.0}
+      APP_PORT: ${APP_PORT:-8000}
+      ARTIFACTS_DIR: /app/artifacts
+      RUNTIME_DIR: /data/runtime
+      EASYOCR_MODULE_PATH: ${EASYOCR_MODULE_PATH:-/opt/easyocr}
+      MODEL_PATH: ${MODEL_PATH:-/app/artifacts/models/rfdetr_small_price_tag_all_annotated_tiled1280_e8_checkpoint_best_total.pth}
+      CATALOG_PATH: ${CATALOG_PATH:-/app/artifacts/data/db_hack.csv}
+      SAMPLE_CSV: ${SAMPLE_CSV:-/app/artifacts/data/sample.csv}
+      SPECIAL_SYMBOL_TEMPLATE_DIR: ${SPECIAL_SYMBOL_TEMPLATE_DIR:-/app/artifacts/special_symbol_templates/full_tags}
+      SAVE_INPUT_VIDEO: ${SAVE_INPUT_VIDEO:-false}
+      SAVE_REVIEW_CROPS: ${SAVE_REVIEW_CROPS:-true}
+      CATALOG_MODE: ${CATALOG_MODE:-assist}
+      WORKER_MODE: ${WORKER_MODE:-local}
+      INFERENCE_DEVICE: cuda
+      MIN_FREE_GB: ${MIN_FREE_GB:-5}
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      LENTA_PIPELINE_ROOT: /app/pipeline
+      LENTA_PIPELINE_SCRIPT: /app/pipeline/run_inference.ps1
+      LENTA_POWERSHELL: pwsh
+      LENTA_PIPELINE_PYTHON: /opt/venv/bin/python
+      LENTA_TESSERACT_EXE: /usr/bin/tesseract
+      LENTA_TESSDATA_DIR: /usr/share/tesseract-ocr/5/tessdata
+      LENTA_RESULTS_DB: /data/runtime/lenta_results.sqlite
+      LENTA_WORKER_QUEUE_DB: /data/runtime/worker_queue.sqlite
+      LENTA_RETRAIN_CONFIG: /data/runtime/retrain_config.json
+      LENTA_UNCERTAIN_ROOT: /data/runtime/uncertain_predictions
+    ports:
+      - "${GPU_APP_PORT:-8001}:${APP_PORT:-8000}"
     volumes:
-      - ./runtime:/runtime
-      - ./artifacts:/artifacts:ro
+      - ${HOST_ARTIFACTS_DIR:-./artifacts}:/app/artifacts:ro
+      - ${HOST_RUNTIME_DIR:-./runtime}:/data/runtime
+    gpus: all
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${APP_PORT:-8000}/api/ready >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
     restart: unless-stopped
